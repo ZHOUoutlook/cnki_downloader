@@ -1,0 +1,4 @@
+# CNKI 论文助手依赖
+
+requests>=2.28.0
+beautifulsoup4>=4.11.0
