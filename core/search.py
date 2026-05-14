@@ -3,6 +3,7 @@
 import json
 import requests
 from typing import Optional, List
+import time
 
 from ..config import (
     TARGET_API,
@@ -29,6 +30,7 @@ class CNKISearcher:
         """
         self.session = session
         self.parser = PaperParser()
+        self.turn_page = ""
 
     def search(
         self,
@@ -39,7 +41,6 @@ class CNKISearcher:
 
         Args:
             query: 查询参数，默认使用 JOURNAL_PAYLOAD
-            page: 页码，从 1 开始
             page_size: 每页数量
 
         Returns:
@@ -54,9 +55,11 @@ class CNKISearcher:
         )
 
         print(f"搜索请求状态码：{response.status_code}")
-        paper_list = self.parser.parse_paper_list(response.text)
+        paper_list , turn_page= self.parser.parse_paper_list(response.text)
         if paper_list == []:
             print("搜索网页text:",response.text)
+            
+        self.turn_page = turn_page
             
         return paper_list
 
@@ -79,26 +82,28 @@ class CNKISearcher:
         """
         payload = JOURNAL_PAYLOAD.copy()
         query_json = JOURNAL_QUERY.copy()
-        query_json["QNode"]["QGroup"][0]["Items"][0]["Value"] = journal_name
-        # query_json["QNode"]["QGroup"][0]["ChildItems"][0]["Items"][0]["value"] = journal_name
+        # query_json["QNode"]["QGroup"][0]["Items"][0]["Value"] = journal_name
+        query_json["QNode"]["QGroup"][0]["ChildItems"][0]["Items"][0]["Value"] = journal_name
 
         payload["pageNum"] = str(page)
         payload["pageSize"] = str(page_size)
         if page > 1:
-            query_json["Products"] = "CJFQ,CAPJ,CJTL,CDFD,CMFD,CPFD,IPFD,CPVD,CCND,WBFD,SCSF,SCHF,SCSD,SNAD,CCJD,CJFN,CCVD"
+            query_json["Products"] = "CJFQ,CAPJ,ZHYX,CJTL,CDFD,CMFD,CPFD,IPFD,CPVD,CCND,WBFD,SCSF,SCHF,SCSD,SNAD,CCJD,CJFN,CCVD"
             query_json["SearchFrom"] = 4
             payload["boolSearch"] = "false" # 关闭布尔搜索，使用默认查询条件 
             payload["sortField"] = "PT"
             payload["sortType"] = "desc"
-            payload["CurPage"] = str(page) 
+            payload["CurPage"] = ""
+            payload["turnpage"] = self.turn_page
         else:
             # 模糊
             # payload["aside"] = f"文献来源：{journal_name}"  
             # 精确
             payload["aside"] = f"（文献来源：{journal_name}(精确)）"
+            
              
         payload["QueryJson"] = json.dumps(query_json, ensure_ascii=False)
-
+        print(payload)
         
 
         return self.search(query=payload)
@@ -126,7 +131,6 @@ class CNKISearcher:
         while True:
             print(f"\n正在获取第 {page} 页...")
             papers = self.search_by_journal(journal_name, page=page, page_size=page_size)
-
             if not papers:
                 print("没有更多数据")
                 break

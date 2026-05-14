@@ -18,7 +18,7 @@ SEARCH_HEADERS = {
     "User-Agent": DEFAULT_HEADERS["User-Agent"],
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "Origin": "https://kns.cnki.net",
-    "Referer": "https://kns.cnki.net/kns8s/defaultresult/index",
+    "Referer": "https://kns.cnki.net/kns8s/AdvSearch",
     "X-Requested-With": "XMLHttpRequest",
 }
 
@@ -36,7 +36,7 @@ JOURNAL_PAYLOAD = {
     "aside": "",
     "searchFrom": "资源范围：总库;  时间范围：更新时间：不限;",
     "subject": "",
-    "turnpage": "8Kf6r96aVUubfe4hUZXU-w!!",
+    # "turnpage": "8Kf6r96aVUubfe4hUZXU-w!!",
     "language": "",
     "uniplatform": "",
     "CurPage": "1"
@@ -47,24 +47,54 @@ JOURNAL_QUERY = {
     "Classid": "WD0FTY92",
     "Products": "",
     "QNode": {
-        "QGroup": [{
-            "Key": "Subject",
-            "Title": "",
-            "Logic": 0,
-            "Items": [{
-                "Field": "LY",
-                "Value": "",
-                "Operator": "DEFAULT",
+        "QGroup": [
+            {
+                "Key": "Subject",
+                "Title": "",
                 "Logic": 0,
-                "Title": "文献来源"
-            }]
-        }]
+                # "Items": [{
+                #     "Field": "LY",
+                #     "Value": "",
+                #     "Operator": "DEFAULT",
+                #     "Logic": 0,
+                #     "Title": "文献来源"
+                # }]
+                "Items":[],
+                "ChildItems":[
+                    {
+                        "Key":"input[data-tipid=gradetxt-1]",
+                        "Title":"文献来源",
+                        "Logic": 0,
+                        "Items":[
+                            {
+                                "Key":"input[data-tipid=gradetxt-1]",
+                                "Title":"文献来源",
+                                "Logic": 0,
+                                "Field": "LY",
+                                "Operator": "DEFAULT",
+                                "Value": "",
+                                "Value2": "",
+                            }
+                        ],
+                        "ChildItems":[]
+                    }
+                ]
+            },
+            {
+                "Key": "ControlGroup",
+                "Title": "",
+                "Logic": 0,
+                "Items": [],
+                "ChildItems": []
+            } 
+        ]
     },
-    "ExScope": 1,
-    "SearchType": 2,
+    "ExScope": "1",
+    "SearchType": 1,
     "Rlang": "BOTH",
     "KuaKuCode": "YSTT4HG0,LSTPFY1C,JUP3MUPD,MPMFIG1A,EMRPGLPA,WQ0UVIAA,BLZOG7CK,PWFIRAGL,NN3FJMUV,NLBO1Z6R",
     "Expands": {},
+    "View": "changeDBCh",
     "SearchFrom": 1
 }
 # 基于文献标题精准检索的请求体模板

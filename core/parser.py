@@ -24,14 +24,21 @@ class PaperParser:
         papers = []
 
         # 定位所有论文行
+        # 精准提取 id="hidTurnPage" 的 value
+        hid_turn_page = soup.find('input', id='hidTurnPage')
         paper_rows = soup.select('table.result-table-list tbody tr')
-
+        
         for row in paper_rows:
             paper = PaperParser._parse_row(row)
             if paper:
                 papers.append(paper)
-
-        return papers
+        if hid_turn_page:
+            value = hid_turn_page.get('value')
+            # print("提取到的 hidTurnPage value：", value)
+        else:
+            value = ""
+            print("未找到hidTurnPage标签")
+        return papers,value
 
     @staticmethod
     def _parse_row(row) -> Paper:
