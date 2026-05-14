@@ -155,7 +155,7 @@ class PDFDownloader(BaseDownloader):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.7,en;q=0.6",
-                "Accept-Encoding": "gzip, deflate, br",
+                # "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive",
                 "Upgrade-Insecure-Requests": "1",
                 "Sec-Fetch-Dest": "document",
@@ -165,14 +165,12 @@ class PDFDownloader(BaseDownloader):
                 "Cache-Control": "max-age=0",
                 "Referer": "https://kns.cnki.net/kns8s/defaultresult/index",
             }
-
             response = self.session.get(
                 url,
                 headers=headers,
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True
             )
-
             # 检查是否被重定向到登录页面或验证页面
             if response.status_code == 302 or 'login' in response.url.lower():
                 print(f"   ⚠️ 可能需要重新登录，状态码: {response.status_code}")
@@ -191,7 +189,7 @@ class PDFDownloader(BaseDownloader):
             response.encoding = 'utf-8'
 
             # 检查返回内容是否有效（不是验证页面）
-            if '验证' in response.text[:500] or 'captcha' in response.text[:500].lower():
+            if '验证' in response.text[:500] or 'captcha' in response.text[:500].lower() or "�" in response.text[:500].lower():
                 print(f"   ⚠️ 触发验证机制，详情链接可能已过期")
 
                 # 优先尝试通过重新搜索获取新的详情链接
@@ -408,7 +406,7 @@ class PDFDownloader(BaseDownloader):
             print(f"   ❌ 获取详情页失败")
             paper.download_status = "failed"
             return None
-
+        
         # 步骤2: 提取 PDF 下载链接
         print(f"   解析下载链接...")
         download_url = self._extract_pdf_url(html)
