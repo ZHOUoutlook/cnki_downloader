@@ -466,7 +466,9 @@ class PDFDownloader(BaseDownloader):
             'files': []
         }
 
-        # 过滤有下载链接的论文，且文件缺失或未下载的论文
+        # 过滤有下载链接的论文，且文件缺失或未下载的论文。同时过滤掉已经完成的论文paper.download_status=completed
+        # 使用标题和日期作为文件名
+        # 检查是否已存在
         downloadable = [
             p for p in papers 
             if p.detail_url
@@ -475,6 +477,8 @@ class PDFDownloader(BaseDownloader):
                 not p.local_pdf_path
                 # 路径存在但文件不存在 → 需要下载
                 or (p.local_pdf_path and not Path(p.local_pdf_path).exists())
+                # 还没完成的论文 → 需要下载
+                or not Path(self.output_dir / f"{sanitize_filename(p.title)}_{p.publish_date.replace('-', '') if p.publish_date else ''}.pdf").exists()
             )
         ]
         print(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接")
