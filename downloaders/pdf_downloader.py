@@ -471,11 +471,13 @@ class PDFDownloader(BaseDownloader):
             # 使用标题和日期作为文件名
             date_str = p.publish_date.replace('-', '') if p.publish_date else ''
             safe_name = sanitize_filename(f"{p.title}_{date_str}")
-            p.local_pdf_path = str(self.output_dir / f"{safe_name}.pdf")
-            if p.detail_url and not Path(p.local_pdf_path).exists() :
+            pdf_path = str(self.output_dir / f"{safe_name}.pdf")
+            # p.local_pdf_path = str(self.output_dir / f"{safe_name}.pdf")
+            if p.detail_url and not Path(pdf_path).exists() :
                 downloadable.append(p)
-            else: # 其他已经完成的则更新状态
-                # 更新 JSON 文件 。只更新local_pdf_path
+            elif not p.local_pdf_path : # 其他已经完成的则更新状态
+                # 更新 JSON 文件 。只更新local_pdf_path,只有当文件已存在且local_pdf_path为空时，才运行
+                p.local_pdf_path = pdf_path
                 if update_json and self.json_file and p.seq > 0:
                     # seq 从 1 开始，索引从 0 开始
                     update_data = {
@@ -532,8 +534,8 @@ class PDFDownloader(BaseDownloader):
                 print(f"   ⏳ 等待 {random_delay:.1f} 秒...")
                 time.sleep(random_delay)
 
-            # 每下载 10 篇清除 session cookies 并重新登录
-            if i % 10 == 0 and i < len(downloadable):
+            # 每下载 30 篇清除 session cookies 并重新登录
+            if i % 30 == 0 and i < len(downloadable):
                 print(f"\n   🧹 已下载 {i} 篇，清除 session cookies...")
                 self.session.cookies.clear()
 

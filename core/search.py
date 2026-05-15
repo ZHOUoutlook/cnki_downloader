@@ -167,9 +167,11 @@ class CNKISearcher:
         query_json["QNode"]["QGroup"][0]["Items"][0]["Value"] = title
         payload["QueryJson"] = json.dumps(query_json, ensure_ascii=False)
         # 模糊
-        payload["aside"] = f"篇名：{title}"  
+        # payload["aside"] = f"篇名：{title}"  
         # 精确
-        # payload["aside"] = f"（篇名：{title}(精确)）"
+        payload["aside"] = f"（篇名：{title}(精确)）"
+        # payload["turnpage"] = self.turn_page
+        # print(payload["turnpage"])
         # print(f"   📝 搜索请求: {payload}")
 
         return self.search(query=payload)
