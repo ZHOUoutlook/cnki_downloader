@@ -4,12 +4,12 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
+from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QAbstractScrollArea, QFileDialog,
+    QAbstractItemView, QFileDialog,
     QGroupBox, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter, QStatusBar,
-    QTabWidget, QTableView, QToolBar, QVBoxLayout, QWidget,
+    QTabWidget, QTableView, QVBoxLayout, QWidget,
 )
 
 from ..config import OUTPUT_DIR
@@ -26,7 +26,6 @@ class MainWindow(QMainWindow):
 
         self._init_ui()
         self._init_menu()
-        self._init_toolbar()
         self._init_statusbar()
 
     # ── UI 初始化 ──────────────────────────────────────────────
@@ -69,43 +68,38 @@ class MainWindow(QMainWindow):
         # 搜索条件组
         search_group = QGroupBox("搜索条件")
         search_layout = QGridLayout()
-        search_layout.addWidget(QLabel("搜索类型："), 0, 0)
 
-        # 搜索类型单选
-        self.search_type_group = QActionGroup(self)
         self.journal_radio = QRadioButton("期刊名")
         self.journal_radio.setChecked(True)
         self.title_radio = QRadioButton("论文标题")
 
-        radio_layout = QGridLayout()
-        radio_layout.addWidget(self.journal_radio, 0, 1)
-        radio_layout.addWidget(self.title_radio, 0, 2)
-        search_layout.addLayout(radio_layout, 0, 1, 1, 3)
+        radio_layout = QHBoxLayout()
+        radio_layout.addWidget(self.journal_radio)
+        radio_layout.addWidget(self.title_radio)
+        search_layout.addLayout(radio_layout, 0, 0, 1, 2)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("输入期刊名称或论文标题")
-        search_layout.addWidget(self.search_input, 1, 1, 1, 3)
+        search_layout.addWidget(self.search_input, 1, 0)
 
-        search_layout.addWidget(QLabel("每页数量："), 2, 0)
-        self.page_size_combo = QSpinBox()
-        self.page_size_combo.setRange(10, 100)
-        self.page_size_combo.setSingleStep(10)
-        self.page_size_combo.setValue(20)
-        search_layout.addWidget(self.page_size_combo, 2, 1)
-
-        search_layout.addWidget(QLabel("页数："), 2, 2)
         self.page_count_spin = QSpinBox()
         self.page_count_spin.setRange(1, 50)
         self.page_count_spin.setValue(1)
-        search_layout.addWidget(self.page_count_spin, 2, 3)
+        self.page_count_spin.setFixedWidth(80)
+        page_layout = QHBoxLayout()
+        page_layout.addWidget(QLabel("页数："))
+        page_layout.addWidget(self.page_count_spin)
+        search_layout.addLayout(page_layout, 1, 1)
 
         self.search_btn = QPushButton("搜索")
         self.clear_btn = QPushButton("清空")
+        self.export_btn = QPushButton("导出 JSON")
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.search_btn)
         btn_layout.addWidget(self.clear_btn)
+        btn_layout.addWidget(self.export_btn)
         btn_layout.addStretch()
-        search_layout.addLayout(btn_layout, 3, 1, 1, 2)
+        search_layout.addLayout(btn_layout, 2, 0, 1, 2)
 
         search_group.setLayout(search_layout)
         layout.addWidget(search_group)
@@ -279,37 +273,6 @@ class MainWindow(QMainWindow):
         about_action = QAction("&关于", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
-
-    # ── 工具栏 ─────────────────────────────────────────────────
-
-    def _init_toolbar(self):
-        toolbar = QToolBar("主工具栏")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
-        # 搜索类型切换
-        journal_action = QAction("期刊搜索", toolbar)
-        journal_action.setCheckable(True)
-        journal_action.setChecked(True)
-        toolbar.addAction(journal_action)
-
-        title_action = QAction("标题搜索", toolbar)
-        title_action.setCheckable(True)
-        toolbar.addAction(title_action)
-
-        toolbar.addSeparator()
-
-        search_action = QAction("搜索", toolbar)
-        toolbar.addAction(search_action)
-
-        toolbar.addSeparator()
-
-        settings_action = QAction("设置", toolbar)
-        toolbar.addAction(settings_action)
-
-        # 信号连接（暂不处理具体逻辑，Phase 2 扩展）
-        journal_action.toggled.connect(lambda checked: self.tabs.setCurrentIndex(0) if checked else None)
-        settings_action.triggered.connect(self._show_about)
 
     # ── 状态栏 ─────────────────────────────────────────────────
 
