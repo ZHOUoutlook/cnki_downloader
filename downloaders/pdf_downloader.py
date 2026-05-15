@@ -465,23 +465,29 @@ class PDFDownloader(BaseDownloader):
             'skipped': 0,
             'files': []
         }
-
-        # 过滤有下载链接的论文，且文件缺失或未下载的论文。同时过滤掉已经完成的论文paper.download_status=completed
-        # 使用标题和日期作为文件名
-        # 检查是否已存在
-        downloadable = [
-            p for p in papers 
-            if p.detail_url
-            and (
-                # 路径为空 → 需要下载
-                not p.local_pdf_path
-                # 路径存在但文件不存在 → 需要下载
-                or (p.local_pdf_path and not Path(p.local_pdf_path).exists())
-                # 还没完成的论文 → 需要下载
-                or not Path(self.output_dir / f"{sanitize_filename(p.title)}_{p.publish_date.replace('-', '') if p.publish_date else ''}.pdf").exists()
-            )
-        ]
-        print(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接")
+        # 根据output设置local_pdf_path
+        downloadable = []
+        for p in papers:
+            # 使用标题和日期作为文件名
+            date_str = p.publish_date.replace('-', '') if p.publish_date else ''
+            safe_name = sanitize_filename(f"{p.title}_{date_str}")
+            p.local_pdf_path = str(self.output_dir / f"{safe_name}.pdf")
+            if p.detail_url and not Path(p.local_pdf_path).exists() :
+                downloadable.append(p)
+            else: # 其他已经完成的则更新状态
+                # 更新 JSON 文件 。只更新local_pdf_path
+                if update_json and self.json_file and paper.seq > 0:
+                    # seq 从 1 开始，索引从 0 开始
+                    update_data = {
+                        '本地PDF路径': paper.local_pdf_path or ''
+                    }
+                    update_json_entry(
+                        self.json_file,
+                        paper.seq - 1,
+                        update_data
+                    )
+                
+        print(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接且还没下载")
 
         if not downloadable:
             print("❌ 没有可需要下载的论文")
