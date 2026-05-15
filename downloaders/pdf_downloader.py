@@ -476,14 +476,14 @@ class PDFDownloader(BaseDownloader):
                 downloadable.append(p)
             else: # 其他已经完成的则更新状态
                 # 更新 JSON 文件 。只更新local_pdf_path
-                if update_json and self.json_file and paper.seq > 0:
+                if update_json and self.json_file and p.seq > 0:
                     # seq 从 1 开始，索引从 0 开始
                     update_data = {
-                        '本地PDF路径': paper.local_pdf_path or ''
+                        '本地PDF路径': p.local_pdf_path or ''
                     }
                     update_json_entry(
                         self.json_file,
-                        paper.seq - 1,
+                        p.seq - 1,
                         update_data
                     )
                 
