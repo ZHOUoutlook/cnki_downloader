@@ -1,5 +1,7 @@
 """主窗口 - CNKI 论文助手 GUI"""
 
+from pathlib import Path
+
 from PyQt6.QtCore import QThread, Qt
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
@@ -7,11 +9,13 @@ from PyQt6.QtWidgets import (
     QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar,
     QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
     QStackedWidget, QStatusBar, QTableView, QTextEdit, QVBoxLayout, QWidget,
+    QFileDialog, QMessageBox,
 )
 
 from ..config import OUTPUT_DIR
+from ..utils.file_utils import save_json, sanitize_filename
 from .styles import get_stylesheet
-from .workers import AuthCheckWorker
+from .workers import AuthCheckWorker, SearchWorker
 
 
 class MainWindow(QMainWindow):
@@ -27,10 +31,18 @@ class MainWindow(QMainWindow):
         self.session = None
         self._auth_thread = None
         self._auth_worker = None
+        self._search_thread = None
+        self._search_worker = None
+        self.all_papers = []
+        self.filtered_papers = []
+        self.current_page = 1
+        self.result_page_size = 20
 
         self._init_ui()
         self._init_menu()
         self._init_statusbar()
+        self._connect_signals()
+        self._refresh_result_page()
         self.refresh_network_status()
 
     # ── UI 初始化 ──────────────────────────────────────────────
@@ -435,6 +447,16 @@ class MainWindow(QMainWindow):
         self.version_label = QLabel("v1.0.0")
         self.status_bar.addPermanentWidget(self.version_label)
 
+    def _connect_signals(self):
+        """连接搜索相关交互。"""
+        self.search_btn.clicked.connect(self.start_search)
+        self.search_input.returnPressed.connect(self.start_search)
+        self.clear_btn.clicked.connect(self.clear_search_results)
+        self.export_btn.clicked.connect(self.export_search_results)
+        self.filter_input.textChanged.connect(self.apply_result_filter)
+        self.prev_btn.clicked.connect(self.show_prev_page)
+        self.next_btn.clicked.connect(self.show_next_page)
+
     # ── 辅助方法 ───────────────────────────────────────────────
 
     def _show_about(self):
@@ -451,6 +473,10 @@ class MainWindow(QMainWindow):
         """关闭窗口时清理后台认证线程。"""
         if self._auth_thread and self._auth_thread.isRunning():
             self.append_log("正在检测网络状态，请稍后关闭窗口。")
+            event.ignore()
+            return
+        if self._search_thread and self._search_thread.isRunning():
+            self.append_log("正在搜索论文，请稍后关闭窗口。")
             event.ignore()
             return
         super().closeEvent(event)
@@ -472,6 +498,7 @@ class MainWindow(QMainWindow):
         self._auth_worker.moveToThread(self._auth_thread)
         self._auth_thread.started.connect(self._auth_worker.run)
         self._auth_worker.succeeded.connect(self._on_auth_succeeded)
+        self._auth_worker.anonymous_succeeded.connect(self._on_anonymous_auth_succeeded)
         self._auth_worker.failed.connect(self._on_auth_failed)
         self._auth_worker.finished.connect(self._auth_thread.quit)
         self._auth_worker.finished.connect(self._auth_worker.deleteLater)
@@ -487,6 +514,15 @@ class MainWindow(QMainWindow):
         self.set_status("校园网已连接")
         self.append_log("校园网认证成功，可以开始搜索和下载。")
 
+    def _on_anonymous_auth_succeeded(self, auth, session, reason: str):
+        """校园网认证失败后，匿名会话初始化成功。"""
+        self.auth = auth
+        self.session = session
+        self._set_network_status("disconnected", "断开 · 请连接校园网")
+        self.set_status("已启用匿名检索，下载需连接校园网")
+        self.append_log(f"校园网认证失败：{reason}")
+        self.append_log("已启用知网匿名会话，搜索可用，下载需连接校园网。")
+
     def _on_auth_failed(self, message: str):
         """认证失败。"""
         self.auth = None
@@ -499,28 +535,190 @@ class MainWindow(QMainWindow):
         self._auth_thread = None
         self._auth_worker = None
 
+    def start_search(self):
+        """启动论文搜索。"""
+        keyword = self.search_input.text().strip()
+        if not keyword:
+            QMessageBox.warning(self, "请输入关键词", "请先输入期刊名称或论文标题。")
+            self.search_input.setFocus()
+            return
+        if self._search_thread and self._search_thread.isRunning():
+            return
+
+        search_type = "title" if self.title_radio.isChecked() else "journal"
+        page_count = self.page_count_spin.value()
+        page_size = int(self.page_size_combo.currentText())
+        self.result_page_size = page_size
+        self.current_page = 1
+        self.all_papers = []
+        self.filtered_papers = []
+        self.table_model.clear()
+        self.update_search_count(0)
+        self._update_pager()
+
+        label = "论文标题" if search_type == "title" else "期刊名"
+        self.append_log(f"开始按{label}搜索：{keyword}，页数 {page_count}，每页 {page_size}。")
+        self.set_status("正在搜索...")
+        self._set_searching_state(True)
+
+        self._search_thread = QThread(self)
+        self._search_worker = SearchWorker(search_type, keyword, page_count, page_size)
+        self._search_worker.moveToThread(self._search_thread)
+        self._search_thread.started.connect(self._search_worker.run)
+        self._search_worker.page_loaded.connect(self._on_search_page_loaded)
+        self._search_worker.succeeded.connect(self._on_search_succeeded)
+        self._search_worker.failed.connect(self._on_search_failed)
+        self._search_worker.finished.connect(self._search_thread.quit)
+        self._search_worker.finished.connect(self._search_worker.deleteLater)
+        self._search_thread.finished.connect(self._search_thread.deleteLater)
+        self._search_thread.finished.connect(self._clear_search_worker)
+        self._search_thread.start()
+
+    def _on_search_page_loaded(self, page: int, count: int, total: int):
+        if count:
+            self.append_log(f"第 {page} 页获取 {count} 篇，累计 {total} 篇。")
+        else:
+            self.append_log(f"第 {page} 页没有更多结果。")
+        self.set_status(f"正在搜索：已获取 {total} 篇")
+
+    def _on_search_succeeded(self, papers: list):
+        self.all_papers = papers
+        self.apply_result_filter()
+        self.set_status("搜索完成")
+        self.append_log(f"搜索完成，共获取 {len(papers)} 篇论文。" if papers else "搜索完成，没有搜索到结果。")
+        self._set_searching_state(False)
+
+    def _on_search_failed(self, message: str):
+        self.set_status("搜索失败")
+        self.append_log(f"搜索失败：{message}")
+        QMessageBox.warning(self, "搜索失败", message)
+        self._set_searching_state(False)
+
+    def _clear_search_worker(self):
+        self._search_thread = None
+        self._search_worker = None
+
+    def _set_searching_state(self, searching: bool):
+        self.search_btn.setEnabled(not searching)
+        self.clear_btn.setEnabled(not searching)
+        self.export_btn.setEnabled(not searching and bool(self.all_papers))
+        self.search_input.setEnabled(not searching)
+        self.journal_radio.setEnabled(not searching)
+        self.title_radio.setEnabled(not searching)
+        self.page_size_combo.setEnabled(not searching)
+        self.page_count_spin.setEnabled(not searching)
+
     def _set_network_status(self, status: str, text: str):
         self.network_status_label.setText(text)
         self.network_status_label.setProperty("status", status)
         self.network_status_label.style().unpolish(self.network_status_label)
         self.network_status_label.style().polish(self.network_status_label)
 
-        is_connected = status == "connected"
         is_checking = status == "checking"
-        enabled = is_connected and not is_checking
-        for button in (
-            self.search_btn,
-            self.export_btn,
-            self.download_selected_btn,
-            self.import_btn,
-            self.start_dl_btn,
-        ):
-            button.setEnabled(enabled)
+        can_download = status == "connected" and not is_checking
+
+        # 搜索、筛选、导出和 JSON 导入不依赖校园网授权。
+        self.search_btn.setEnabled(not (getattr(self, "_search_thread", None) and self._search_thread.isRunning()))
+        self.export_btn.setEnabled(bool(getattr(self, "all_papers", [])))
+        self.import_btn.setEnabled(True)
+
+        # 只有真正需要校园网授权的下载动作随网络状态启停。
+        self.download_selected_btn.setEnabled(can_download)
+        self.start_dl_btn.setEnabled(can_download)
         self.refresh_network_btn.setEnabled(not is_checking)
 
     def append_log(self, message: str):
         """追加日志"""
         self.log_text.append(message)
+
+    def apply_result_filter(self):
+        """按标题、作者、来源筛选已加载结果。"""
+        keyword = self.filter_input.text().strip().lower()
+        if not keyword:
+            self.filtered_papers = list(self.all_papers)
+        else:
+            self.filtered_papers = [
+                paper for paper in self.all_papers
+                if keyword in self._paper_filter_text(paper).lower()
+            ]
+        self.current_page = 1
+        self.update_search_count(len(self.filtered_papers))
+        self._refresh_result_page()
+
+    def _paper_filter_text(self, paper) -> str:
+        authors = " ".join(author.name for author in getattr(paper, "authors", []))
+        return " ".join([getattr(paper, "title", ""), authors, getattr(paper, "source", "")])
+
+    def _refresh_result_page(self):
+        """刷新当前页结果。"""
+        total = len(self.filtered_papers)
+        total_pages = self._total_result_pages()
+        if total_pages == 0:
+            self.current_page = 0
+            page_papers = []
+        else:
+            self.current_page = max(1, min(self.current_page, total_pages))
+            start = (self.current_page - 1) * self.result_page_size
+            page_papers = self.filtered_papers[start:start + self.result_page_size]
+        self.table_model.set_papers(page_papers)
+        self._update_pager(total, total_pages)
+
+    def _total_result_pages(self) -> int:
+        if not self.filtered_papers:
+            return 0
+        return (len(self.filtered_papers) + self.result_page_size - 1) // self.result_page_size
+
+    def _update_pager(self, total: int = None, total_pages: int = None):
+        if total is None:
+            total = len(self.filtered_papers)
+        if total_pages is None:
+            total_pages = self._total_result_pages()
+        self.page_label.setText(f"第 {self.current_page} 页 / 共 {total_pages} 页 · {total} 篇")
+        self.prev_btn.setEnabled(total_pages > 0 and self.current_page > 1)
+        self.next_btn.setEnabled(total_pages > 0 and self.current_page < total_pages)
+
+    def show_prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self._refresh_result_page()
+
+    def show_next_page(self):
+        total_pages = self._total_result_pages()
+        if self.current_page < total_pages:
+            self.current_page += 1
+            self._refresh_result_page()
+
+    def clear_search_results(self):
+        """清空搜索输入和结果。"""
+        self.search_input.clear()
+        self.filter_input.clear()
+        self.all_papers = []
+        self.filtered_papers = []
+        self.current_page = 1
+        self.table_model.clear()
+        self.update_search_count(0)
+        self._refresh_result_page()
+        self.export_btn.setEnabled(False)
+        self.set_status("已清空")
+        self.append_log("已清空搜索条件和结果。")
+
+    def export_search_results(self):
+        """导出当前搜索结果为 JSON。"""
+        if not self.all_papers:
+            QMessageBox.information(self, "没有可导出的结果", "当前没有搜索结果可导出。")
+            return
+        default_name = sanitize_filename(self.search_input.text().strip() or "搜索结果") + ".json"
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出搜索结果",
+            str(Path(OUTPUT_DIR) / default_name),
+            "JSON 文件 (*.json)",
+        )
+        if not filename:
+            return
+        saved_path = save_json(self.all_papers, filename)
+        self.append_log(f"搜索结果已导出：{saved_path}")
+        self.set_status("导出完成")
 
     def update_search_count(self, count: int):
         """更新搜索结果计数"""
