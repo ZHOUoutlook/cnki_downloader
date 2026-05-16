@@ -1,5 +1,7 @@
 """CNKI 登录认证模块"""
 
+import json
+
 import requests
 from typing import Optional
 
@@ -118,6 +120,14 @@ class CNKIAuth:
         )
 
         print(f"登录接口返回：{resp.status_code} | {resp.text}")
+        login_result = self._parse_login_result(resp.text)
+        if not login_result.get("IsSuccess", False):
+            error_msg = (
+                login_result.get("ErrorMsg")
+                or login_result.get("Msg")
+                or "登录失败，请确认当前网络处于校园网许可范围内"
+            )
+            raise ConnectionError(error_msg)
 
         # 3. 跳转到知网新平台补全所有业务 Cookie
         session.get(
@@ -134,6 +144,17 @@ class CNKIAuth:
         print(self._cookie_string)
 
         return session
+
+    @staticmethod
+    def _parse_login_result(raw_text: str) -> dict:
+        """解析 CNKI IP 登录接口结果。"""
+        text = raw_text.strip()
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ConnectionError("登录接口返回格式异常，无法判断校园网状态") from exc
 
     def get_session(self) -> Optional[requests.Session]:
         """
