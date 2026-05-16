@@ -25,14 +25,9 @@ from cnki_downloader.downloaders import PDFDownloader
 def cmd_search(args):
     """搜索论文命令"""
     try:
-        # 1. 登录
         auth = CNKIAuth()
-        session = auth.ip_login()
-
-        if not auth.is_authenticated():
-            print("❌ 登录失败")
-            return 1
-
+        # 直接匿名登录
+        session = auth.anonymous_login()
         # 2. 搜索
         searcher = CNKISearcher(session)
 

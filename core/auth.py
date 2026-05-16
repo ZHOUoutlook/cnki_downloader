@@ -24,6 +24,71 @@ class CNKIAuth:
         self._session: Optional[requests.Session] = None
         self._cookie_string: Optional[str] = None
 
+    def anonymous_login(self) -> requests.Session:
+        """
+        匿名访问知网：通过 recsys GenerateClientID 获取 Ecp_ClientId，
+        再初始化 KNS 匿名会话。
+        """
+        session = requests.Session()
+
+        headers = dict(self.headers or {})
+        headers.pop("Cookie", None)
+        headers.pop("Host", None)
+        headers.setdefault("User-Agent", "Mozilla/5.0")
+        headers.setdefault("Accept", "application/json, text/javascript, */*; q=0.01")
+        headers.setdefault("Referer", "https://kns.cnki.net/")
+        headers.setdefault("Origin", "https://kns.cnki.net")
+
+        try:
+            # 1. 直接请求生产环境 GenerateClientID
+            r = session.get(
+                "https://recsys.cnki.net/RCDService/api/UtilityOpenApi/GenerateClientID",
+                headers=headers,
+                timeout=10,
+            )
+
+            r.raise_for_status()
+            data = r.json()
+
+            if not data.get("Success") or not data.get("Data"):
+                raise RuntimeError(f"获取 Ecp_ClientId 失败：{data}")
+
+            ecp_client_id = data["Data"]
+
+            # 2. 写入 requests session cookie
+            session.cookies.set(
+                "Ecp_ClientId",
+                ecp_client_id,
+                domain=".cnki.net",
+                path="/",
+            )
+
+            # 3. 访问 KNS，补充 SID_kns_new
+            kns_headers = dict(headers)
+            kns_headers.update({
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://kns.cnki.net/",
+                "Upgrade-Insecure-Requests": "1",
+            })
+
+            session.get(
+                "https://kns.cnki.net/kns8s/defaultresult/index",
+                headers=kns_headers,
+                timeout=15,
+            )
+
+            # 4. 保存会话
+            self._session = session
+            self._cookie_string = "; ".join(
+                f"{c.name}={c.value}" for c in session.cookies
+            )
+
+            print("\n✅ 【匿名会话创建成功】")
+            return session
+
+        except requests.RequestException as e:
+            raise RuntimeError(f"匿名会话初始化失败：网络请求异常：{e}") from e
+
     def ip_login(self) -> requests.Session:
         """
         使用 IP 地址登录知网
