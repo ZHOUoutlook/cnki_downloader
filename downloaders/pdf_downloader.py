@@ -494,7 +494,8 @@ class PDFDownloader(BaseDownloader):
         if not downloadable:
             print("❌ 没有可需要下载的论文")
             return results
-
+        # 打乱下载顺序
+        random.shuffle(downloadable)
         for i, paper in enumerate(downloadable, 1):
             print(f"\n[{i}/{len(downloadable)}] ", end="")
 
