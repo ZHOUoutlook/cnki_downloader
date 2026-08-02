@@ -8,6 +8,7 @@ from .file_utils import (
     sanitize_filename,
     get_unique_filepath,
     print_paper_summary,
+    file_exists,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     'sanitize_filename',
     'get_unique_filepath',
     'print_paper_summary',
+    'file_exists',
 ]

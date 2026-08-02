@@ -473,21 +473,30 @@ class PDFDownloader(BaseDownloader):
             safe_name = sanitize_filename(f"{p.title}_{date_str}")
             pdf_path = str(self.output_dir / f"{safe_name}.pdf")
             # p.local_pdf_path = str(self.output_dir / f"{safe_name}.pdf")
-            if p.detail_url and not Path(pdf_path).exists() :
+            # 更新字段
+            update_data = {}
+            if p.detail_url and not Path(pdf_path).exists() :   #存在详情连接且pdf不存在
                 downloadable.append(p)
-            elif not p.local_pdf_path : # 其他已经完成的则更新状态
-                # 更新 JSON 文件 。只更新local_pdf_path,只有当文件已存在且local_pdf_path为空时，才运行
+            elif not p.local_pdf_path or p.download_status != "completed":     # pdf存在但local_pdf_path字段为空
+                # 更新 JSON 文件 。只更新local_pdf_path和download_status,只有当文件已存在且local_pdf_path为空时，才运行
                 p.local_pdf_path = pdf_path
+                update_data['本地PDF路径'] = p.local_pdf_path or ''
+                p.download_status = "completed"
+                update_data['下载状态'] = p.download_status or 'pending'
+                # if p.download_status != "completed":
+                    
+                # update_data = {
+                #     '下载状态': p.download_status or 'pending',
+                #     '本地PDF路径': p.local_pdf_path or ''
+                # }
                 if update_json and self.json_file and p.seq > 0:
                     # seq 从 1 开始，索引从 0 开始
-                    update_data = {
-                        '本地PDF路径': p.local_pdf_path or ''
-                    }
                     update_json_entry(
                         self.json_file,
                         p.seq - 1,
                         update_data
                     )
+            
                 
         print(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接且还没下载")
 

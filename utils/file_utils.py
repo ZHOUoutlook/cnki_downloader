@@ -219,4 +219,11 @@ def file_exists(filepath: Path) -> bool:
     Returns:
         bool: 文件是否存在
     """
-    return filepath.exists()
+    path = Path(filepath)
+    if path.exists():
+        return True
+    # 非绝对路径时，检查 OUTPUT_DIR 目录
+    if not path.is_absolute():
+        output_path = Path(OUTPUT_DIR) / filepath
+        return output_path.exists()
+    return False

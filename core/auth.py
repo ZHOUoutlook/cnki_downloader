@@ -3,6 +3,7 @@
 import json
 
 import requests
+import time
 from typing import Optional
 
 from ..config import (
@@ -109,12 +110,21 @@ class CNKIAuth:
             headers=self.headers,
             timeout=LOGIN_TIMEOUT
         )
-
+        payload = {
+            "isAutoLogin": True,
+            "checkCode": "",
+            "isForceLogin": True,
+            "p": 0,
+            "t": int(time.time() * 1000),
+            "verifyType": 3,
+            "fingerprint": "338cc11becf5638ddc167cd5a9e8d37c"
+        }
+        
         # 2. 调用官方 IP 登录接口
         print("正在调用知网官方 IP 登录接口：IpLoginPo")
         resp = session.post(
             url=IP_LOGIN_API,
-            json={},
+            json=payload,
             headers=self.headers,
             timeout=LOGIN_TIMEOUT
         )

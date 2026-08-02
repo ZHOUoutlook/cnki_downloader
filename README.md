@@ -59,7 +59,24 @@ python main.py search --journal "财政研究" --pages 3
 # 指定每页数量
 python main.py search --journal "财政研究" --page-size 50
 
+python main.py search --journal "经济学(季刊)" --output "经济学(季刊).json" --pages 50
+
 ```
+
+### 获取详情
+
+```bash
+# 从 JSON 文件加载论文并获取详情页补充信息（摘要、关键词、作者单位等）
+python main.py detail --input output/财政研究.json
+
+# 指定输出文件（保存更新后的数据）
+python main.py detail --input output/财政研究.json --output output/财政研究_详情.json
+
+# 限制处理数量
+python main.py detail --input output/财政研究.json --limit 10
+```
+
+> **说明**：detail 阶段会访问每篇论文的详情页面，补充搜索结果中缺失的信息，如 DOI、摘要、关键词、作者单位、ISSN、CN 号、页码、卷号、期号、页码范围、基金、专辑、专题、分类号等。
 
 ### 下载 PDF
 
@@ -113,6 +130,19 @@ papers = searcher.search_by_journal_all_pages("财政研究", max_pages=5)
 # 保存
 save_json(papers, "papers.json")
 
+# 获取详情（补充摘要、关键词、作者单位等信息）
+from cnki_downloader.core.parser import PaperParser
+for paper in papers:
+    if paper.detail_url and paper.abstract == "":
+        # 访问详情页并解析
+        detail_info = PaperParser.parse_paper_detail(detail_html)
+        if detail_info:
+            paper.doi = detail_info.get('doi', paper.doi)
+            paper.abstract = detail_info.get('abstract', paper.abstract)
+            paper.keywords = detail_info.get('keywords', paper.keywords)
+            paper.author_org = detail_info.get('author_org', paper.author_org)
+            # ... 其他字段
+
 # 下载 PDF（支持自动刷新过期链接）
 downloader = PDFDownloader(
     session,
@@ -133,6 +163,47 @@ print(f"下载完成: 成功 {results['success']}, 失败 {results['failed']}")
 | `search_by_journal(name)` | 按期刊名称搜索论文 |
 | `search_by_journal_all_pages(name, max_pages)` | 搜索期刊所有页面论文 |
 | `search_by_title(title)` | 按论文标题精准搜索 |
+
+### 数据字段
+
+#### Paper 模型字段
+
+| 字段 | 说明 |
+|------|------|
+| `seq` | 序号 |
+| `title` | 标题 |
+| `detail_url` | 详情链接 |
+| `authors` | 作者列表 `List[Author]` |
+| `source` | 来源期刊 |
+| `publish_date` | 发表时间 |
+| `db_type` | 数据库类型 |
+| `citation_count` | 被引次数 |
+| `download_count` | 下载次数 |
+| `download_url` | PDF下载链接 |
+| `html_url` | HTML阅读链接 |
+| `ai_read_url` | AI阅读链接 |
+| `doi` | DOI |
+| `abstract` | 摘要 |
+| `keywords` | 关键词列表 |
+| `author_org` | 作者单位列表 `List[str]` |
+| `volume` | 卷号 |
+| `issue` | 期号 |
+| `page_range` | 页码范围 |
+| `pages` | 页数 |
+| `fund` | 基金 |
+| `album` | 专辑 |
+| `topic` | 专题 |
+| `cls_no` | 分类号 |
+| `issn` | ISSN |
+| `cn` | CN号 |
+
+#### Author 模型字段
+
+| 字段 | 说明 |
+|------|------|
+| `name` | 作者名 |
+| `profile_url` | 作者主页链接 |
+| `affiliation_indices` | 作者所属单位的序号，如 "1,2" |
 
 ### 下载功能
 
@@ -163,6 +234,7 @@ TITLE_PAYLOAD = {...}
 - [x] PDF 下载
 - [x] 过期链接自动刷新
 - [x] 下载状态更新
+- [x] 详情页信息补充（卷号、期号、页码范围、作者单位等）
 - [ ] 断点续传
 - [ ] 并发下载
 
