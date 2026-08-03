@@ -475,7 +475,7 @@ class PDFDownloader(BaseDownloader):
             # p.local_pdf_path = str(self.output_dir / f"{safe_name}.pdf")
             # 更新字段
             update_data = {}
-            if p.detail_url and not Path(pdf_path).exists() :   #存在详情连接且pdf不存在
+            if p.detail_url and not Path(pdf_path).exists() :   #存在详情链接且pdf不存在
                 downloadable.append(p)
             elif not p.local_pdf_path or p.download_status != "completed":     # pdf存在但local_pdf_path字段为空
                 # 更新 JSON 文件 。只更新local_pdf_path和download_status,只有当文件已存在且local_pdf_path为空时，才运行

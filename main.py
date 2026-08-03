@@ -18,9 +18,8 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from cnki_downloader import CNKIAuth, CNKISearcher
-# from cnki_downloader.config import JOURNAL_PAYLOAD,TITLE_PAYLOAD
 from cnki_downloader.downloaders import PDFDownloader
-from cnki_downloader.utils import load_json,save_json,update_json_entry,print_paper_summary,file_exists
+from cnki_downloader.utils import load_json,save_json,print_paper_summary,file_exists
 
 
 def cmd_search(args):
@@ -69,7 +68,12 @@ def cmd_search(args):
             existing_papers = load_json(output_file)
             existing_by_title = {p['标题']: p for p in existing_papers}
             # search 只更新检索字段，不更新详情字段
-            detail_fields = {'DOI', '摘要', '关键词', '作者','作者单位', 'ISSN', 'CN', '页码', '基金', '专辑', '专题', '分类号','下载状态','本地PDF路径'}
+            detail_fields = {
+                'DOI', '摘要', '关键词', '作者', '作者单位',
+                'ISSN', 'CN', '页数', '页码范围', '卷号', '期号',
+                '基金', '专辑', '专题', '分类号',
+                '下载状态', '本地PDF路径',
+            }
 
             updated_count = 0
             added_count = 0
@@ -79,17 +83,16 @@ def cmd_search(args):
                 if paper.title in existing_by_title:
                     # 论文已存在，只更新检索字段，保留详情信息
                     existing = existing_by_title[paper.title]
-                    idx = existing_papers.index(existing)
-                    for key ,value in paper_dict.items():
+                    for key, value in paper_dict.items():
                         # 跳过详情字段，保留原有值
                         if key in detail_fields:
                             continue
                         # 只更新有值的检索字段
                         if isinstance(value, list):
                             if value:
-                                existing_papers[idx][key] = value
+                                existing[key] = value
                         elif value and str(value).strip():
-                            existing_papers[idx][key] = value
+                            existing[key] = value
                     
                     updated_count += 1
                 else:
@@ -97,11 +100,11 @@ def cmd_search(args):
                     existing_papers.append(paper_dict)
                     added_count += 1
 
-            # 重新编号，按照发表时间重新编号，然后再重新排序
+            # 按发表时间降序排序并重新编号
             existing_papers.sort(key=lambda x: x['发表时间'], reverse=True)
             for i, p in enumerate(existing_papers):
                 p['序号'] = i + 1
-            existing_papers.sort(key=lambda x: x['序号'])
+                
             # 保存整个文件（有新论文或已有更新）
             save_json(existing_papers, output_file)
             if added_count > 0:
@@ -143,7 +146,7 @@ def cmd_detail(args):
         print(f"\n📄 共 {len(papers)} 篇论文")
 
         for paper in papers:
-            # 如果有详情链接,且摘要存在，获取详情页补充信息
+            # 仅当缺少详情时才重新抓取详情页
             if paper.detail_url and paper.abstract == "":
                 print(f"\n🌐 正在获取详情页: {paper.detail_url}")
                 try:
@@ -168,26 +171,23 @@ def cmd_detail(args):
                         "Referer": "https://kns.cnki.net/kns8s/defaultresult/index",
                     }
                     resp = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-                    resp.encoding = 'utf-8'
+                    # 尊重服务器声明的编码；缺失时退回 apparent_encoding
+                    if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
+                        resp.encoding = resp.apparent_encoding or 'utf-8'
+                        
                     print(f"HTTP 状态码: {resp.status_code}")
                     detail_info = PaperParser.parse_paper_detail(resp.text)
                     print(f"解析到的详情信息: {detail_info}")
                     if detail_info:
-                        paper.doi = detail_info.get('doi', paper.doi)
-                        paper.abstract = detail_info.get('abstract', paper.abstract)
-                        paper.keywords = detail_info.get('keywords', paper.keywords)
-                        paper.authors = detail_info.get('authors', paper.authors)
-                        paper.author_org = detail_info.get('author_org', paper.author_org)
-                        paper.issn = detail_info.get('issn', paper.issn)
-                        paper.cn = detail_info.get('cn', paper.cn)
-                        paper.pages = detail_info.get('pages', paper.pages)
-                        paper.volume = detail_info.get('volume', paper.volume)
-                        paper.issue = detail_info.get('issue', paper.issue)
-                        paper.page_range = detail_info.get('page_range', paper.page_range)
-                        paper.fund = detail_info.get('fund', paper.fund)
-                        paper.album = detail_info.get('album', paper.album)
-                        paper.topic = detail_info.get('topic', paper.topic)
-                        paper.cls_no = detail_info.get('cls_no', paper.cls_no)
+                        for attr in (
+                            'doi', 'abstract', 'keywords', 'authors',
+                            'author_org', 'issn', 'cn', 'pages',
+                            'volume', 'issue', 'page_range', 'fund',
+                            'album', 'topic', 'cls_no',
+                        ):
+                            value = detail_info.get(attr)
+                            if value:  # 跳过 None / '' / []
+                                setattr(paper, attr, value)
                         print(f"✅ 详情页获取成功")
                 except Exception as e:
                     print(f"⚠️ 详情页获取失败: {e}")
