@@ -11,6 +11,7 @@
 import argparse
 import sys
 from pathlib import Path
+import json
 
 # 支持从项目目录直接运行
 _project_root = Path(__file__).parent.parent
@@ -20,6 +21,9 @@ if str(_project_root) not in sys.path:
 from cnki_downloader import CNKIAuth, CNKISearcher
 from cnki_downloader.downloaders import PDFDownloader
 from cnki_downloader.utils import load_json,save_json,print_paper_summary,file_exists
+
+# 从 output.upload 导入 Uploader 类
+from output.upload import Uploader
 
 
 def cmd_search(args):
@@ -221,9 +225,10 @@ def cmd_detail(args):
                 print(f"专辑: {paper.album}")
                 print(f"专题: {paper.topic}")
                 print(f"分类号: {paper.cls_no}")
-                print(f"下载状态: {paper.download_status}")
                 if paper.local_pdf_path:
+                    paper.download_status = "completed"
                     print(f"本地PDF路径: {paper.local_pdf_path}")
+                print(f"下载状态: {paper.download_status}")
                 print(f"{'='*60}")
 
         # 保存更新后的数据到 JSON 文件
@@ -291,16 +296,155 @@ def cmd_download(args):
         else:
             papers_to_download = downloadable
 
-        results = downloader.download_batch(
+        
+        updated_data = downloader.download_batch(
             papers=papers_to_download,
             delay=args.delay,
-            update_json=not args.no_update_json
         )
 
+        save_json(updated_data, args.input)
         return 0
 
     except Exception as e:
         print(f"❌ 下载失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+def cmd_upload(args):
+    """上传文献命令"""
+    try:
+        # 加载 JSON 文件
+        json_data = load_json(args.input)
+
+        if not json_data:
+            print("❌ JSON 文件为空")
+            return 1
+
+        # 支持单个对象或数组
+        if isinstance(json_data, dict):
+            json_data = [json_data]
+        elif not isinstance(json_data, list):
+            print("❌ JSON 文件格式错误，应为对象或数组")
+            return 1
+
+        print(f"\n📤 共 {len(json_data)} 篇文献待上传")
+
+        # 创建上传器
+        uploader = Uploader(base_url=args.base_url)
+        # 先登录，后续循环复用 token
+        uploader.login()
+        
+        # 首先过滤。过滤掉已经上传的文献，通过check_dois接口过滤
+        dois_to_check = [item.get("DOI") for item in json_data if item.get("DOI")]
+        
+        if not dois_to_check:
+            print("❌ 没有可检查的 DOI")
+            return 1
+
+        missing_dois = uploader.check_dois(dois=dois_to_check)
+
+        success_count = 0
+        already_uploaded_count = 0
+        empty_count = 0
+        skip_count = 0
+        fail_count = 0
+        duplicate_count = 0
+
+        for i, item in enumerate(json_data):
+            print(f"\n[{i+1}/{len(json_data)}] 处理中...")
+
+            # 跳过的文献.DOI 为空或缺失
+            if not item.get("DOI") or item.get("DOI").strip() == "":
+                print(f"⚠️ 跳过：缺少 DOI")
+                empty_count += 1
+                continue
+            
+            # 跳过关键词为空或缺失
+            if not item.get("关键词") or item.get("关键词") == []:
+                print(f"⚠️ 跳过：缺少 关键词")
+                skip_count += 1
+                continue
+            
+            # 获取文件路径（必需）
+            file_path = item.get('本地PDF路径')
+            if not file_path:
+                print(f"⚠️ 缺少 本地PDF路径 字段，跳过")
+                fail_count += 1
+                continue
+            
+            # 跳过已存在的 DOI
+            if item.get("DOI") not in missing_dois:
+                print(f"⚠️ 跳过：DOI 已存在")
+                already_uploaded_count += 1
+                continue
+
+            # 构建作者列表
+            authors_list = item.get("作者", [])
+            affiliations_list = item.get("作者单位", [])
+            authors = [] # [{"name": "周小豪", "affiliation": "中国人民大学商学院"}, {"name": "朱晓林", "affiliation": "中国人民大学商学院"}]
+            
+            for author in authors_list:
+                name = author.get("name", "")
+                indices = author.get("affiliation_indices", "")
+                affiliation_names = []
+                if indices :
+                    for idx in indices.split(","):
+                        idx = int(idx.strip()) - 1  # CNKI通常从1开始编号
+                        if 0 <= idx < len(affiliations_list):
+                            affiliation_names.append(affiliations_list[idx])
+                else:
+                    # 如果没有索引，默认取第一个单位。确保affiliations_list不为空
+                    if affiliations_list:
+                        affiliation_names = affiliations_list[0:1]
+                affiliation = ";".join(affiliation_names)
+                authors.append({"name": name, "affiliation": affiliation})
+            
+            # 构造关键字，列表变字符串  "数据价值链,数字技术,碳外部性,产业数字化"
+            keywords = item.get("关键词", [])
+            keywords = [kw.strip() for kw in keywords if kw.strip()]  # 去空格并过滤空关键词
+            keywords = ",".join(keywords)  # 列表变字符串
+
+            # 构建上传参数
+            upload_kwargs = {
+                "if_cn": True,  # 假设都是中文文献
+                "title": item.get("标题", ""),
+                "journal": item.get("来源", ""),
+                "publish_date": item.get("发表时间", ""),
+                "volume": item.get("卷号", ""),
+                "issue": item.get("期号", ""),
+                "page_range": item.get("页码范围", ""),
+                "doi": item.get("DOI", ""),
+                "authors": json.dumps(authors),  # 列表字典字符串
+                "abstract": item.get("摘要", ""),
+                "keywords": keywords,  # 字符串
+                "page_count": item.get("页数", ""),
+                "album": item.get("专辑", ""),
+                "topic": item.get("专题", ""),
+                "cls_no": item.get("分类号", ""),
+            }
+
+            try:
+                uploader.upload(file_path=file_path, **upload_kwargs)
+                success_count += 1
+            except Exception as e:
+                err_msg = str(e)
+                if "该文件已经上传" in err_msg or "already uploaded" in err_msg.lower():
+                    print(f"⚠️ 跳过：文件已上传")
+                    duplicate_count += 1
+                else:
+                    print(f"⚠️ 上传失败: {e}")
+                    fail_count += 1
+
+        print(f"\n{'='*50}")
+        print(f"📊 上传完成：成功 {success_count}，已上传 {already_uploaded_count}，DOI缺失 {empty_count}，重复 {duplicate_count}，跳过 {skip_count}，失败 {fail_count}")
+        print(f"{'='*50}")
+
+        return 0
+
+    except Exception as e:
+        print(f"❌ 上传失败: {e}")
         import traceback
         traceback.print_exc()
         return 1
@@ -324,6 +468,9 @@ def main():
 
   # 下载前 10 篇
   python main.py download --input papers.json --limit 10
+
+  # 上传文献
+  python main.py upload --input upload.json
         """
     )
 
@@ -399,6 +546,19 @@ def main():
         help='不更新 JSON 文件中的下载状态'
     )
 
+    # upload 子命令
+    upload_parser = subparsers.add_parser('upload', help='上传文献')
+    upload_parser.add_argument(
+        '--input', '-i',
+        required=True,
+        help='文献 JSON 文件'
+    )
+    upload_parser.add_argument(
+        '--base-url',
+        default='http://localhost:8000',
+        help='API 基础地址 (默认: http://localhost:8000)'
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -411,6 +571,8 @@ def main():
         return cmd_download(args)
     elif args.command == 'detail':
         return cmd_detail(args)
+    elif args.command == 'upload':
+        return cmd_upload(args)
 
     return 0
 

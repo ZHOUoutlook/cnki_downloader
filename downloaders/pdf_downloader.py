@@ -13,7 +13,7 @@ from ..core.search import CNKISearcher
 
 from .base import BaseDownloader
 from ..models import Paper
-from ..utils import sanitize_filename, get_unique_filepath, update_json_entry
+from ..utils import sanitize_filename
 from ..config import (
     DOWNLOAD_TIMEOUT,
     PDF_DOWNLOAD_BASE,
@@ -441,9 +441,8 @@ class PDFDownloader(BaseDownloader):
         self,
         papers: List[Paper],
         max_workers: int = 1,
-        skip_existing: bool = True,
+        # skip_existing: bool = True,
         delay: float = 10.0,
-        update_json: bool = True
     ) -> dict:
         """
         批量下载论文 PDF
@@ -456,7 +455,7 @@ class PDFDownloader(BaseDownloader):
             update_json: 是否更新 JSON 文件
 
         Returns:
-            dict: 下载结果统计
+            papers: 下载更新后的papers
         """
         results = {
             'total': len(papers),
@@ -474,35 +473,19 @@ class PDFDownloader(BaseDownloader):
             pdf_path = str(self.output_dir / f"{safe_name}.pdf")
             # p.local_pdf_path = str(self.output_dir / f"{safe_name}.pdf")
             # 更新字段
-            update_data = {}
             if p.detail_url and not Path(pdf_path).exists() :   #存在详情链接且pdf不存在
                 downloadable.append(p)
             elif not p.local_pdf_path or p.download_status != "completed":     # pdf存在但local_pdf_path字段为空
                 # 更新 JSON 文件 。只更新local_pdf_path和download_status,只有当文件已存在且local_pdf_path为空时，才运行
                 p.local_pdf_path = pdf_path
-                update_data['本地PDF路径'] = p.local_pdf_path or ''
                 p.download_status = "completed"
-                update_data['下载状态'] = p.download_status or 'pending'
-                # if p.download_status != "completed":
-                    
-                # update_data = {
-                #     '下载状态': p.download_status or 'pending',
-                #     '本地PDF路径': p.local_pdf_path or ''
-                # }
-                if update_json and self.json_file and p.seq > 0:
-                    # seq 从 1 开始，索引从 0 开始
-                    update_json_entry(
-                        self.json_file,
-                        p.seq - 1,
-                        update_data
-                    )
-            
+
                 
         print(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接且还没下载")
-
+        
         if not downloadable:
             print("❌ 没有可需要下载的论文")
-            return results
+            return papers
         # 打乱下载顺序
         random.shuffle(downloadable)
         for i, paper in enumerate(downloadable, 1):
@@ -518,26 +501,7 @@ class PDFDownloader(BaseDownloader):
                 results['files'].append(filepath)
             else:
                 results['failed'] += 1
-
-            # 更新 JSON 文件
-            if update_json and self.json_file and paper.seq > 0:
-                # seq 从 1 开始，索引从 0 开始
-                update_data = {
-                    '下载状态': paper.download_status,
-                    '本地PDF路径': paper.local_pdf_path or ''
-                }
-                # 如果 detail_url 被刷新了，也更新它
-                if (paper._original_detail_url and
-                    paper.detail_url and
-                    paper.detail_url != paper._original_detail_url):
-                    update_data['详情链接'] = paper.detail_url
-                    print(f"   📝 详情链接已更新")
-
-                update_json_entry(
-                    self.json_file,
-                    paper.seq - 1,
-                    update_data
-                )
+                print(f"   ❌ 下载失败")
             # 添加延迟，避免请求过快
             if i < len(downloadable) and delay > 0:
                 random_delay = delay * (0.5 + 0.5 * random.random())  # 5-10秒随机延迟
@@ -566,38 +530,5 @@ class PDFDownloader(BaseDownloader):
         print(f"   ❌ 失败: {results['failed']}")
         print(f"{'='*50}")
 
-        return results
+        return papers
 
-    def download_from_json(
-        self,
-        json_file: str,
-        limit: Optional[int] = None,
-        delay: float = 10.0,
-        update_json: bool = True
-    ) -> dict:
-        """
-        从 JSON 文件读取论文列表并下载
-
-        Args:
-            json_file: JSON 文件路径
-            limit: 限制下载数量
-            delay: 每次下载之间的延迟（秒）
-            update_json: 是否更新 JSON 文件
-
-        Returns:
-            dict: 下载结果统计
-        """
-        from ..utils import load_json
-
-        # 设置 JSON 文件路径
-        self.json_file = json_file
-
-        # 加载论文数据
-        papers_data = load_json(json_file)
-        papers = [Paper.from_dict(p) for p in papers_data]
-
-        if limit:
-            papers = papers[:limit]
-            print(f"限制下载前 {limit} 篇")
-
-        return self.download_batch(papers, delay=delay, update_json=update_json)

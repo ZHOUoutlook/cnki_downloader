@@ -3,6 +3,7 @@
 知网论文搜索和下载工具
 
 ## 项目结构
+
 ```
 cnki_downloader/
 ├── main.py                 # 程序入口，CLI 参数解析
@@ -31,6 +32,7 @@ cnki_downloader/
 │   └── file_utils.py       # 文件操作工具
 │
 └── output/                 # 输出目录（PDF、JSON 等）
+    └── upload.py           # Uploader - 文献上传器
 ```
 
 ## 安装
@@ -60,7 +62,6 @@ python main.py search --journal "财政研究" --pages 3
 python main.py search --journal "财政研究" --page-size 50
 
 python main.py search --journal "经济学(季刊)" --output "经济学(季刊).json" --pages 50
-
 ```
 
 ### 获取详情
@@ -104,6 +105,42 @@ python main.py download --input papers.json --no-update-json
 ```
 
 > **自动目录分类说明**：当使用默认的 `output/pdfs` 目录时，系统会根据输入 JSON 文件名自动创建子目录。例如下载 `财政研究.json` 中的论文，PDF 会保存到 `output/pdfs/财政研究/` 目录，便于按期刊分类管理。
+
+### 上传文献
+
+```bash
+# 上传文献（DOI 为空或缺失的会自动跳过）
+python main.py upload --input output/papers.json
+
+# 指定 API 地址
+python main.py upload --input output/papers.json --base-url http://localhost:8000
+```
+
+> **上传 JSON 格式**：文件内容为数组或单个对象，每项需包含 `本地PDF路径`（PDF 文件路径）和 `DOI`。作者、单位等信息会从 JSON 中自动提取并关联。
+
+**JSON 示例**：
+
+```json
+[
+  {
+    "标题": "论文标题",
+    "DOI": "10.1234/example",
+    "本地PDF路径": "output/pdfs/论文.pdf",
+    "作者": [{"name": "张三", "affiliation_indices": "1"}],
+    "作者单位": ["XX大学"],
+    "期刊": "期刊名称",
+    "发表时间": "2024-01-01",
+    "卷号": "1",
+    "期号": "1",
+    "页码": "1-10",
+    "摘要": "摘要内容",
+    "关键词": ["关键词1", "关键词2"],
+    "专辑": "专辑",
+    "主题": "主题",
+    "分类号": "分类"
+  }
+]
+```
 
 ## 作为库使用
 
@@ -158,51 +195,51 @@ print(f"下载完成: 成功 {results['success']}, 失败 {results['failed']}")
 
 ### 搜索功能
 
-| 方法 | 说明 |
-|------|------|
-| `search_by_journal(name)` | 按期刊名称搜索论文 |
+| 方法                                             | 说明                 |
+| ------------------------------------------------ | -------------------- |
+| `search_by_journal(name)`                      | 按期刊名称搜索论文   |
 | `search_by_journal_all_pages(name, max_pages)` | 搜索期刊所有页面论文 |
-| `search_by_title(title)` | 按论文标题精准搜索 |
+| `search_by_title(title)`                       | 按论文标题精准搜索   |
 
 ### 数据字段
 
 #### Paper 模型字段
 
-| 字段 | 说明 |
-|------|------|
-| `seq` | 序号 |
-| `title` | 标题 |
-| `detail_url` | 详情链接 |
-| `authors` | 作者列表 `List[Author]` |
-| `source` | 来源期刊 |
-| `publish_date` | 发表时间 |
-| `db_type` | 数据库类型 |
-| `citation_count` | 被引次数 |
-| `download_count` | 下载次数 |
-| `download_url` | PDF下载链接 |
-| `html_url` | HTML阅读链接 |
-| `ai_read_url` | AI阅读链接 |
-| `doi` | DOI |
-| `abstract` | 摘要 |
-| `keywords` | 关键词列表 |
-| `author_org` | 作者单位列表 `List[str]` |
-| `volume` | 卷号 |
-| `issue` | 期号 |
-| `page_range` | 页码范围 |
-| `pages` | 页数 |
-| `fund` | 基金 |
-| `album` | 专辑 |
-| `topic` | 专题 |
-| `cls_no` | 分类号 |
-| `issn` | ISSN |
-| `cn` | CN号 |
+| 字段               | 说明                      |
+| ------------------ | ------------------------- |
+| `seq`            | 序号                      |
+| `title`          | 标题                      |
+| `detail_url`     | 详情链接                  |
+| `authors`        | 作者列表`List[Author]`  |
+| `source`         | 来源期刊                  |
+| `publish_date`   | 发表时间                  |
+| `db_type`        | 数据库类型                |
+| `citation_count` | 被引次数                  |
+| `download_count` | 下载次数                  |
+| `download_url`   | PDF下载链接               |
+| `html_url`       | HTML阅读链接              |
+| `ai_read_url`    | AI阅读链接                |
+| `doi`            | DOI                       |
+| `abstract`       | 摘要                      |
+| `keywords`       | 关键词列表                |
+| `author_org`     | 作者单位列表`List[str]` |
+| `volume`         | 卷号                      |
+| `issue`          | 期号                      |
+| `page_range`     | 页码范围                  |
+| `pages`          | 页数                      |
+| `fund`           | 基金                      |
+| `album`          | 专辑                      |
+| `topic`          | 专题                      |
+| `cls_no`         | 分类号                    |
+| `issn`           | ISSN                      |
+| `cn`             | CN号                      |
 
 #### Author 模型字段
 
-| 字段 | 说明 |
-|------|------|
-| `name` | 作者名 |
-| `profile_url` | 作者主页链接 |
+| 字段                    | 说明                         |
+| ----------------------- | ---------------------------- |
+| `name`                | 作者名                       |
+| `profile_url`         | 作者主页链接                 |
 | `affiliation_indices` | 作者所属单位的序号，如 "1,2" |
 
 ### 下载功能
@@ -227,14 +264,15 @@ TITLE_PAYLOAD = {...}
 
 ## 功能状态
 
-- [x] IP 登录认证
-- [x] 论文搜索（期刊/标题）
-- [x] HTML 解析
-- [x] JSON 导出
-- [x] PDF 下载
-- [x] 过期链接自动刷新
-- [x] 下载状态更新
-- [x] 详情页信息补充（卷号、期号、页码范围、作者单位等）
+- [X] IP 登录认证
+- [X] 论文搜索（期刊/标题）
+- [X] HTML 解析
+- [X] JSON 导出
+- [X] PDF 下载
+- [X] 过期链接自动刷新
+- [X] 下载状态更新
+- [X] 详情页信息补充（卷号、期号、页码范围、作者单位等）
+- [X] 文献上传
 - [ ] 断点续传
 - [ ] 并发下载
 

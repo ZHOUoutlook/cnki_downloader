@@ -45,7 +45,11 @@ def save_json(
     filepath = Path(filename)
     if not filepath.is_absolute():
         ensure_dir(OUTPUT_DIR)
-        filepath = Path(OUTPUT_DIR) / filepath
+        # 如果已经是 OUTPUT_DIR 下的路径，则不再重复添加
+        if not str(filepath).startswith(str(Path(OUTPUT_DIR))):
+            filepath = Path(OUTPUT_DIR) / filepath
+        else:
+            filepath = Path(OUTPUT_DIR) / filepath.relative_to(Path(OUTPUT_DIR))
 
     # 转换数据
     if data and hasattr(data[0], 'to_dict'):
