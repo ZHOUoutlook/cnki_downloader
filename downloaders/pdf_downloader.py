@@ -441,7 +441,7 @@ class PDFDownloader(BaseDownloader):
         self,
         papers: List[Paper],
         max_workers: int = 1,
-        # skip_existing: bool = True,
+        skip_download: bool = False,
         delay: float = 10.0,
     ) -> dict:
         """
@@ -450,7 +450,7 @@ class PDFDownloader(BaseDownloader):
         Args:
             papers: 论文列表
             max_workers: 最大并发数（暂不支持并发）
-            skip_existing: 是否跳过已存在的文件
+            skip_download: 是否跳过下载文件
             delay: 每次下载之间的延迟（秒）
             update_json: 是否更新 JSON 文件
 
@@ -483,8 +483,8 @@ class PDFDownloader(BaseDownloader):
                 
         print(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接且还没下载")
         
-        if not downloadable:
-            print("❌ 没有可需要下载的论文")
+        if not downloadable or skip_download:
+            print("❌ 没有可需要下载的论文或者跳过下载，直接返回")
             return papers
         # 打乱下载顺序
         random.shuffle(downloadable)

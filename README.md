@@ -1,22 +1,32 @@
 # CNKI 论文助手
 
-知网论文搜索和下载工具
+知网（CNKI）论文搜索、批量下载与文献管理工具，提供命令行（CLI）与 PyQt6 桌面版（GUI）两种使用方式。
+
+## 功能特性
+
+- **搜索**：按期刊名称或论文标题检索，支持分页、多页抓取
+- **详情补全**：自动访问详情页补充 DOI、摘要、关键词、作者单位、卷期页码等字段
+- **批量下载**：PDF/CAJ 下载，自动重试、断点跳过、过期链接自动刷新
+- **文献上传**：批量上传本地文献到文献管理 API，自动跳过缺失字段与重复文件
+- **桌面 GUI**：网络状态检测、期刊/标题搜索、结果筛选与导出
+- **免登录搜索**：匿名会话即可搜索，下载需校园网 IP 认证
 
 ## 项目结构
 
 ```
 cnki_downloader/
-├── main.py                 # 程序入口，CLI 参数解析
-├── config.py               # 配置文件（API 地址、请求头、查询参数模板）
+├── main.py                 # CLI 入口（search / detail / download / upload）
+├── gui_app.py              # GUI 入口（PyQt6 桌面版）
+├── config.py               # 配置（API 端点、请求头、查询参数模板、超时）
 ├── __init__.py             # 包入口，导出公共 API
-├── README.md               # 项目文档
 ├── requirements.txt        # 依赖管理
+├── GUI_PLAN.md             # GUI 开发规划文档
+├── LICENSE                 # MIT 许可证
 │
 ├── core/                   # 核心功能模块
-│   ├── __init__.py
-│   ├── auth.py             # CNKIAuth - IP 登录认证
-│   ├── search.py           # CNKISearcher - 论文搜索（期刊/标题）
-│   └── parser.py           # PaperParser - HTML 解析
+│   ├── auth.py             # CNKIAuth - IP 登录 / 匿名会话认证
+│   ├── search.py           # CNKISearcher - 论文搜索（期刊/标题/多页）
+│   └── parser.py           # PaperParser - 检索结果与详情页 HTML 解析
 │
 ├── models/                 # 数据模型
 │   ├── __init__.py
@@ -25,14 +35,23 @@ cnki_downloader/
 ├── downloaders/            # 下载器模块
 │   ├── __init__.py
 │   ├── base.py             # BaseDownloader - 下载器基类
-│   └── pdf_downloader.py   # PDFDownloader - PDF 下载器（支持链接过期自动刷新）
+│   └── pdf_downloader.py   # PDFDownloader - PDF/CAJ 下载（链接过期自动刷新）
+│
+├── gui/                    # PyQt6 图形界面模块
+│   ├── main_window.py      # 主窗口（搜索、结果表格、下载面板）
+│   ├── workers.py          # 后台线程（认证检测、搜索任务）
+│   ├── result_model.py     # PaperTableModel - 结果表格模型
+│   ├── styles.py           # QSS 样式
+│   └── ...                 # 面板/对话框模块（部分为占位）
 │
 ├── utils/                  # 工具函数
 │   ├── __init__.py
-│   └── file_utils.py       # 文件操作工具
+│   └── file_utils.py       # JSON 读写、文件名清理等
 │
-└── output/                 # 输出目录（PDF、JSON 等）
-    └── upload.py           # Uploader - 文献上传器
+└── output/                 # 输出目录
+    ├── upload.py           # Uploader - 文献批量上传器
+    ├── pdfs/               # 下载的 PDF/CAJ，按期刊分子目录
+    └── *.json              # 搜索结果数据
 ```
 
 ## 安装
@@ -41,84 +60,91 @@ cnki_downloader/
 pip install -r requirements.txt
 ```
 
-## 使用方法
+依赖：`requests`、`beautifulsoup4`（核心）、`PyQt6`（GUI）。
+
+## 快速开始
+
+```bash
+# 命令行：搜索期刊论文
+python main.py search --journal "财政研究"
+
+# 桌面版 GUI
+python gui_app.py
+```
+## 使用方法（CLI）
 
 ### 搜索论文
 
 ```bash
-# 搜索指定期刊论文
+# 按期刊搜索（匿名会话，无需登录）
 python main.py search --journal "财政研究"
 
-# 搜索指定标题论文（精准匹配）
+# 按标题精准搜索
 python main.py search --title "预分配视角下的分配体系比较与协同"
 
-# 搜索并保存到指定文件
-python main.py search --journal "财政研究" --output papers.json
-
-# 搜索多页结果
+# 获取多页结果
 python main.py search --journal "财政研究" --pages 3
 
-# 指定每页数量
-python main.py search --journal "财政研究" --page-size 50
+# 指定页码与每页数量
+python main.py search --journal "财政研究" --page 2 --page-size 50
 
+# 指定输出文件（默认 papers.json，保存到 output/ 目录）
 python main.py search --journal "经济学(季刊)" --output "经济学(季刊).json" --pages 50
 ```
+
+> **增量合并说明**：`search` 会按论文标题对输出文件做增量合并——已存在的论文仅更新检索字段（保留详情、下载状态等字段），新论文自动追加，并按发表时间降序重新编号。
 
 ### 获取详情
 
 ```bash
-# 从 JSON 文件加载论文并获取详情页补充信息（摘要、关键词、作者单位等）
+# 从 JSON 文件加载论文，补充摘要、关键词、作者单位、DOI 等详情字段
 python main.py detail --input output/财政研究.json
-
-# 指定输出文件（保存更新后的数据）
-python main.py detail --input output/财政研究.json --output output/财政研究_详情.json
-
-# 限制处理数量
-python main.py detail --input output/财政研究.json --limit 10
 ```
 
-> **说明**：detail 阶段会访问每篇论文的详情页面，补充搜索结果中缺失的信息，如 DOI、摘要、关键词、作者单位、ISSN、CN 号、页码、卷号、期号、页码范围、基金、专辑、专题、分类号等。
+> **说明**：`detail` 需要 IP 登录（校园网）访问详情页；仅当论文缺少摘要时才重新抓取；结果直接写回输入文件。
 
 ### 下载 PDF
 
 ```bash
-# 下载论文 PDF（使用默认目录）
-# PDF 会自动保存到 output/pdfs/<文件名>/ 目录
-# 例如：--input output/财政研究.json → 保存到 output/pdfs/财政研究/
-python main.py download --input output/财政研究.json
+# 下载论文 PDF（默认按输入文件名分类保存）
+python main.py download --input output/财政研究.json   # → output/pdfs/财政研究/
+python main.py download --input output/经济研究.json   # → output/pdfs/经济研究/
 
-# 使用默认目录时，不同期刊的论文会自动分类存储
-python main.py download --input output/经济研究.json  # → output/pdfs/经济研究/
-python main.py download --input output/管理世界.json  # → output/pdfs/管理世界/
-
-# 指定自定义目录（不使用自动分类）
+# 指定自定义目录（不自动分类）
 python main.py download --input papers.json --output-dir my_pdfs
 
 # 限制下载数量
 python main.py download --input papers.json --limit 10
 
-# 设置下载延迟（避免请求过快）
+# 设置下载延迟（默认 10 秒）
 python main.py download --input papers.json --delay 20
 
-# 不更新 JSON 文件中的下载状态
-python main.py download --input papers.json --no-update-json
+# 只更新下载状态，不实际下载文件
+python main.py download --input papers.json --skip_download
 ```
 
-> **自动目录分类说明**：当使用默认的 `output/pdfs` 目录时，系统会根据输入 JSON 文件名自动创建子目录。例如下载 `财政研究.json` 中的论文，PDF 会保存到 `output/pdfs/财政研究/` 目录，便于按期刊分类管理。
+> **下载说明**：
+> - 使用默认 `output/pdfs` 目录时，会按输入 JSON 文件名自动创建子目录，便于按期刊分类管理
+> - 自动跳过已下载的文件（断点续传）
+> - 打乱下载顺序，并使用 50%~100% 的随机延迟，降低被反爬限制的风险
+> - 每下载 30 篇自动清除 cookies 并重新登录
+> - 详情链接过期时会通过标题重新搜索获取新链接，并更新 JSON 中的 `详情链接`
+> - 部分论文只有 CAJ 格式，会自动下载 `.caj` 文件
+> - 自动更新 JSON 中的 `下载状态` 与 `本地PDF路径`
 
 ### 上传文献
 
 ```bash
-# 上传文献（DOI 为空或缺失的会自动跳过）
+# 批量上传文献（JSON 中的多篇文献）
 python main.py upload --input output/papers.json
 
-# 指定 API 地址
+# 指定文献管理 API 地址
 python main.py upload --input output/papers.json --base-url http://localhost:8000
 ```
 
-> **上传 JSON 格式**：文件内容为数组或单个对象，每项需包含 `本地PDF路径`（PDF 文件路径）和 `DOI`。作者、单位等信息会从 JSON 中自动提取并关联。
+> **上传规则**：自动跳过缺少 `DOI`、`关键词` 或 `本地PDF路径` 的条目；上传前调用 `check_dois` 接口统计已存在的文献；重复文件由上传接口识别并跳过。
 
-**JSON 示例**：
+**JSON 示例**（与 `download` / `detail` 生成的字段一致）：
 
 ```json
 [
@@ -136,11 +162,22 @@ python main.py upload --input output/papers.json --base-url http://localhost:800
     "摘要": "摘要内容",
     "关键词": ["关键词1", "关键词2"],
     "专辑": "专辑",
-    "主题": "主题",
+    "专题": "专题",
     "分类号": "分类"
   }
 ]
 ```
+## 使用方法（GUI）
+
+```bash
+python gui_app.py
+```
+
+- **网络状态检测**：启动后自动检测，校园网 IP 认证成功后可搜索和下载；失败时自动降级为匿名会话，可搜索（下载需连接校园网）
+- **搜索**：支持期刊名 / 标题检索，可设置每页数量并获取多页结果，实时显示搜索进度
+- **结果表格**：展示序号、标题、作者、来源、时间、被引、下载，支持关键词筛选、分页与清空
+- **导出 JSON**：将搜索结果导出为 JSON 文件
+- **下载面板**：已提供界面（导入 JSON、开始下载、停止、进度条与统计），下载流程当前以 CLI 为主，详细规划见 `GUI_PLAN.md`
 
 ## 作为库使用
 
@@ -148,137 +185,134 @@ python main.py upload --input output/papers.json --base-url http://localhost:800
 from cnki_downloader import CNKIAuth, CNKISearcher, save_json
 from cnki_downloader.downloaders import PDFDownloader
 
-# 登录
+# 认证：优先 IP 登录（校园网），否则匿名会话
 auth = CNKIAuth()
 session = auth.ip_login()
+if not auth.is_authenticated():
+    session = auth.anonymous_login()  # 匿名会话可搜索，不可下载
 
 # 搜索
 searcher = CNKISearcher(session)
-
-# 按期刊搜索
-papers = searcher.search_by_journal("财政研究")
-
-# 按标题精准搜索
-papers = searcher.search_by_title("预分配视角下的分配体系比较与协同")
-
-# 搜索所有页面
-papers = searcher.search_by_journal_all_pages("财政研究", max_pages=5)
+papers = searcher.search_by_journal("财政研究")                       # 按期刊
+papers = searcher.search_by_title("预分配视角下的分配体系比较与协同")   # 按标题
+papers = searcher.search_by_journal_all_pages("财政研究", max_pages=5)  # 多页
 
 # 保存
 save_json(papers, "papers.json")
 
-# 获取详情（补充摘要、关键词、作者单位等信息）
+# 获取详情（补充摘要、关键词、作者单位等）
 from cnki_downloader.core.parser import PaperParser
 for paper in papers:
     if paper.detail_url and paper.abstract == "":
-        # 访问详情页并解析
         detail_info = PaperParser.parse_paper_detail(detail_html)
         if detail_info:
             paper.doi = detail_info.get('doi', paper.doi)
             paper.abstract = detail_info.get('abstract', paper.abstract)
             paper.keywords = detail_info.get('keywords', paper.keywords)
             paper.author_org = detail_info.get('author_org', paper.author_org)
-            # ... 其他字段
 
 # 下载 PDF（支持自动刷新过期链接）
 downloader = PDFDownloader(
     session,
     output_dir="output/pdfs",
     json_file="papers.json",  # 用于更新下载状态
-    auth=auth  # 用于重新登录
+    auth=auth                # 用于重新登录
 )
-results = downloader.download_batch(papers, delay=10.0)
-print(f"下载完成: 成功 {results['success']}, 失败 {results['failed']}")
+updated = downloader.download_batch(papers, delay=10.0)
+print(f"已更新 {len(updated)} 篇论文的下载状态")
 ```
 
 ## 核心功能
 
-### 搜索功能
+### 认证
 
-| 方法                                             | 说明                 |
-| ------------------------------------------------ | -------------------- |
-| `search_by_journal(name)`                      | 按期刊名称搜索论文   |
-| `search_by_journal_all_pages(name, max_pages)` | 搜索期刊所有页面论文 |
-| `search_by_title(title)`                       | 按论文标题精准搜索   |
+| 方法 | 说明 |
+| --- | --- |
+| `CNKIAuth().ip_login()` | IP 登录（需校园网授权 IP），返回完整认证会话 |
+| `CNKIAuth().anonymous_login()` | 匿名会话，免登录搜索 |
+| `auth.is_authenticated()` | 检查当前是否已认证 |
 
+### 搜索
+
+| 方法 | 说明 |
+| --- | --- |
+| `search_by_journal(name, page, page_size)` | 按期刊名称搜索论文 |
+| `search_by_journal_all_pages(name, max_pages, page_size)` | 搜索期刊所有页论文 |
+| `search_by_title(title, page, page_size)` | 按论文标题精准搜索 |
 ### 数据字段
 
 #### Paper 模型字段
 
-| 字段               | 说明                      |
-| ------------------ | ------------------------- |
-| `seq`            | 序号                      |
-| `title`          | 标题                      |
-| `detail_url`     | 详情链接                  |
-| `authors`        | 作者列表`List[Author]`  |
-| `source`         | 来源期刊                  |
-| `publish_date`   | 发表时间                  |
-| `db_type`        | 数据库类型                |
-| `citation_count` | 被引次数                  |
-| `download_count` | 下载次数                  |
-| `download_url`   | PDF下载链接               |
-| `html_url`       | HTML阅读链接              |
-| `ai_read_url`    | AI阅读链接                |
-| `doi`            | DOI                       |
-| `abstract`       | 摘要                      |
-| `keywords`       | 关键词列表                |
-| `author_org`     | 作者单位列表`List[str]` |
-| `volume`         | 卷号                      |
-| `issue`          | 期号                      |
-| `page_range`     | 页码范围                  |
-| `pages`          | 页数                      |
-| `fund`           | 基金                      |
-| `album`          | 专辑                      |
-| `topic`          | 专题                      |
-| `cls_no`         | 分类号                    |
-| `issn`           | ISSN                      |
-| `cn`             | CN号                      |
+| 字段 | 说明 |
+| --- | --- |
+| `seq` | 序号 |
+| `title` | 标题 |
+| `detail_url` | 详情链接 |
+| `authors` | 作者列表 `List[Author]` |
+| `source` | 来源期刊 |
+| `publish_date` | 发表时间 |
+| `db_type` | 数据库类型 |
+| `citation_count` | 被引次数 |
+| `download_count` | 下载次数 |
+| `download_url` | PDF 下载链接 |
+| `html_url` | HTML 阅读链接 |
+| `ai_read_url` | CNKI AI 阅读链接 |
+| `doi` | DOI |
+| `abstract` | 摘要 |
+| `keywords` | 关键词列表 |
+| `author_org` | 作者单位（详情页补充） |
+| `volume` | 卷号 |
+| `issue` | 期号 |
+| `page_range` | 页码范围 |
+| `pages` | 页数 |
+| `fund` | 基金 |
+| `album` | 专辑 |
+| `topic` | 专题 |
+| `cls_no` | 分类号 |
+| `issn` | ISSN |
+| `cn` | CN 号 |
+| `local_pdf_path` | 本地 PDF 路径（下载后） |
+| `download_status` | 下载状态：`pending` / `downloading` / `completed` / `failed` |
 
 #### Author 模型字段
 
-| 字段                    | 说明                         |
-| ----------------------- | ---------------------------- |
-| `name`                | 作者名                       |
-| `profile_url`         | 作者主页链接                 |
-| `affiliation_indices` | 作者所属单位的序号，如 "1,2" |
-
-### 下载功能
-
-- **自动重试**：下载失败时自动重试
-- **链接过期刷新**：当详情链接过期触发验证机制时，自动通过标题重新搜索获取新的详情链接
-- **断点续传**：跳过已下载的文件
-- **状态更新**：自动更新 JSON 文件中的下载状态和刷新后的详情链接
-- **文件命名**：下载文件以 `论文标题_发表日期` 格式命名
+| 字段 | 说明 |
+| --- | --- |
+| `name` | 作者名 |
+| `profile_url` | 作者主页链接 |
+| `affiliation_indices` | 作者所属单位的序号，如 `"1,2"` |
 
 ## 配置说明
 
-`config.py` 中包含两种搜索模板：
+`config.py` 集中管理：
 
-```python
-# 基于期刊来源检索
-JOURNAL_PAYLOAD = {...}
-
-# 基于文献标题精准检索
-TITLE_PAYLOAD = {...}
-```
+- **API 端点**：IP 登录、搜索、详情页、PDF 下载接口地址
+- **请求头**：默认请求头与搜索请求头
+- **查询模板**：`JOURNAL_PAYLOAD`（期刊检索）、`TITLE_PAYLOAD`（标题检索）等
+- **超时设置**：登录、请求、下载超时时间
+- **输出目录**：`OUTPUT_DIR = "output"`
 
 ## 功能状态
 
 - [X] IP 登录认证
-- [X] 论文搜索（期刊/标题）
-- [X] HTML 解析
-- [X] JSON 导出
-- [X] PDF 下载
-- [X] 过期链接自动刷新
+- [X] 匿名会话（免登录搜索）
+- [X] 论文搜索（期刊 / 标题 / 多页）
+- [X] HTML 解析（检索结果 + 详情页）
+- [X] JSON 导出与增量合并
+- [X] PDF / CAJ 下载
+- [X] 过期链接自动刷新（重新搜索 + 重新登录）
 - [X] 下载状态更新
-- [X] 详情页信息补充（卷号、期号、页码范围、作者单位等）
-- [X] 文献上传
-- [ ] 断点续传
+- [X] 详情页信息补充
+- [X] 文献批量上传
+- [X] 断点续传（跳过已下载文件）
+- [X] 防反爬（打乱顺序、随机延迟、定期重新登录）
+- [X] GUI 桌面版（网络检测 / 搜索 / 导出）
+- [ ] GUI 下载流程
 - [ ] 并发下载
 
 ## 注意事项
 
-1. **IP 登录**：需要在知网授权的 IP 范围内（如校园网）才能使用 IP 登录功能
-2. **下载延迟**：建议设置 9-11 秒的延迟，避免请求过于频繁被限制
-3. **文件格式**：部分论文可能只提供 CAJ 格式，下载器会自动下载 CAJ 文件
-4. **链接过期**：当详情链接过期时，下载器会自动通过论文标题重新搜索获取新的链接，并更新 JSON 文件中的 `详情链接` 字段
+1. **网络环境**：IP 登录与下载需要在知网授权 IP 范围内（如校园网）；匿名会话可以搜索，但无法下载
+2. **下载延迟**：默认 10 秒（建议 9-11 秒），避免请求过于频繁被限制
+3. **文件格式**：部分论文只提供 CAJ 格式，下载器会自动下载 `.caj` 文件
+4. **链接过期**：详情链接过期时，下载器会自动通过论文标题重新搜索获取新链接，并更新 JSON 中的 `详情链接` 字段

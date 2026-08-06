@@ -275,6 +275,11 @@ class PaperParser:
                 if vol_issue_match:
                     result['volume'] = vol_issue_match.group(1).strip()  # 2026
                     result['issue'] = vol_issue_match.group(3).strip()  # 06
+                # 匹配卷号期号：2023 (04)  - 处理换行和空白
+                elif re.search(r'(\d{4})\s*\(\s*(\d+)\s*\)', top_tip_text):
+                    result['volume'] = re.search(r'(\d{4})\s*\(\s*(\d+)\s*\)', top_tip_text).group(1).strip()
+                    result['issue'] = re.search(r'(\d{4})\s*\(\s*(\d+)\s*\)', top_tip_text).group(2).strip()
+
                 # 匹配页码范围：如 ": 1101-1130"
                 page_range_match = re.search(r':\s*(\d+-\d+)', top_tip_text)
                 if page_range_match:

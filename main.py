@@ -103,8 +103,14 @@ def cmd_search(args):
                     # 新论文，添加到列表
                     existing_papers.append(paper_dict)
                     added_count += 1
-
+            # 基于标题去重
+            unique_papers = {}
+            for p in existing_papers:
+                title = p.get('标题')
+                if title not in unique_papers:
+                    unique_papers[title] = p
             # 按发表时间降序排序并重新编号
+            existing_papers = list(unique_papers.values())
             existing_papers.sort(key=lambda x: x['发表时间'], reverse=True)
             for i, p in enumerate(existing_papers):
                 p['序号'] = i + 1
@@ -151,7 +157,7 @@ def cmd_detail(args):
 
         for paper in papers:
             # 仅当缺少详情时才重新抓取详情页
-            if paper.detail_url and paper.abstract == "":
+            if paper.detail_url and (paper.abstract == "" or paper.volume == "" or paper.issue == ""):
                 print(f"\n🌐 正在获取详情页: {paper.detail_url}")
                 try:
                     # 处理相对 URL
@@ -300,6 +306,7 @@ def cmd_download(args):
         updated_data = downloader.download_batch(
             papers=papers_to_download,
             delay=args.delay,
+            skip_download=args.skip_download,
         )
 
         save_json(updated_data, args.input)
@@ -541,9 +548,9 @@ def main():
         help='每次下载之间的延迟秒数 (默认: 10.0)'
     )
     download_parser.add_argument(
-        '--no-update-json',
-        action='store_true',
-        help='不更新 JSON 文件中的下载状态'
+        '--skip_download',
+        default = False,
+        help='跳过下载文件'
     )
 
     # upload 子命令
