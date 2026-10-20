@@ -199,11 +199,17 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(QLabel("每页"), 2, 0)
         search_layout.addWidget(self.page_size_combo, 2, 1)
 
+        self.start_page_spin = QSpinBox()
+        self.start_page_spin.setRange(1, 999)
+        self.start_page_spin.setValue(1)
+        search_layout.addWidget(QLabel("起始页"), 3, 0)
+        search_layout.addWidget(self.start_page_spin, 3, 1)
+
         self.page_count_spin = QSpinBox()
         self.page_count_spin.setRange(1, 50)
         self.page_count_spin.setValue(1)
-        search_layout.addWidget(QLabel("页数"), 3, 0)
-        search_layout.addWidget(self.page_count_spin, 3, 1)
+        search_layout.addWidget(QLabel("页数"), 4, 0)
+        search_layout.addWidget(self.page_count_spin, 4, 1)
 
         self.search_btn = QPushButton("搜索")
         self.search_btn.setObjectName("primaryButton")
@@ -215,8 +221,8 @@ class MainWindow(QMainWindow):
         btn_layout.setSpacing(8)
         btn_layout.addWidget(self.search_btn)
         btn_layout.addWidget(self.clear_btn)
-        search_layout.addLayout(btn_layout, 4, 0, 1, 2)
-        search_layout.addWidget(self.export_btn, 5, 0, 1, 2)
+        search_layout.addLayout(btn_layout, 5, 0, 1, 2)
+        search_layout.addWidget(self.export_btn, 6, 0, 1, 2)
 
         return panel
 
@@ -548,6 +554,7 @@ class MainWindow(QMainWindow):
         search_type = "title" if self.title_radio.isChecked() else "journal"
         page_count = self.page_count_spin.value()
         page_size = int(self.page_size_combo.currentText())
+        start_page = self.start_page_spin.value()
         self.result_page_size = page_size
         self.current_page = 1
         self.all_papers = []
@@ -562,7 +569,7 @@ class MainWindow(QMainWindow):
         self._set_searching_state(True)
 
         self._search_thread = QThread(self)
-        self._search_worker = SearchWorker(search_type, keyword, page_count, page_size)
+        self._search_worker = SearchWorker(search_type, keyword, page_count, page_size, start_page)
         self._search_worker.moveToThread(self._search_thread)
         self._search_thread.started.connect(self._search_worker.run)
         self._search_worker.page_loaded.connect(self._on_search_page_loaded)
@@ -607,6 +614,7 @@ class MainWindow(QMainWindow):
         self.title_radio.setEnabled(not searching)
         self.page_size_combo.setEnabled(not searching)
         self.page_count_spin.setEnabled(not searching)
+        self.start_page_spin.setEnabled(not searching)
 
     def _set_network_status(self, status: str, text: str):
         self.network_status_label.setText(text)

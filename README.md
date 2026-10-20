@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **搜索**：按期刊名称或论文标题检索，支持分页、多页抓取
+- **搜索**：按期刊名称或论文标题检索，支持分页、多页抓取，可指定起始页
 - **详情补全**：自动访问详情页补充 DOI、摘要、关键词、作者单位、卷期页码等字段
 - **批量下载**：PDF/CAJ 下载，自动重试、断点跳过、过期链接自动刷新
 - **文献上传**：批量上传本地文献到文献管理 API，自动跳过缺失字段与重复文件
@@ -68,6 +68,9 @@ pip install -r requirements.txt
 # 命令行：搜索期刊论文
 python main.py search --journal "财政研究"
 
+# 从第 2 页开始搜索，直到第 5 页结束
+python main.py search --journal "财政研究" --start-page 2 --pages 5
+
 # 桌面版 GUI
 python gui_app.py
 ```
@@ -85,14 +88,19 @@ python main.py search --title "预分配视角下的分配体系比较与协同"
 # 获取多页结果
 python main.py search --journal "财政研究" --pages 3
 
-# 指定页码与每页数量
-python main.py search --journal "财政研究" --page 2 --page-size 50
+# 从第 2 页开始搜索，直到第 5 页结束
+python main.py search --journal "财政研究" --start-page 2 --pages 5
+
+# 指定起始页码与每页数量
+python main.py search --journal "财政研究" --start-page 2 --page-size 50
 
 # 指定输出文件（默认 papers.json，保存到 output/ 目录）
 python main.py search --journal "经济学(季刊)" --output "经济学(季刊).json" --pages 50
 ```
 
-> **增量合并说明**：`search` 会按论文标题对输出文件做增量合并——已存在的论文仅更新检索字段（保留详情、下载状态等字段），新论文自动追加，并按发表时间降序重新编号。
+> **增量合并说明**：`search` 会按「标题 + 发表时间」对输出文件做增量合并——**标题、发表时间两者都完全相同**的论文视为同一篇（不新增），仅刷新检索字段（详情链接、下载链接、HTML/AI 阅读链接、被引、下载次数、数据库类型、来源等），保留详情与下载字段（摘要、DOI、关键词、作者、作者单位、卷号、期号、页码范围、分类号、下载状态、本地PDF路径等，其中下载状态由 `download` 阶段维护，不会被检索结果重置）；任一不同的论文作为新论文自动追加，最后按发表时间降序重新编号（同一次运行内重复抓到的论文只追加一次）。
+>
+> 按期刊检索时，来源不等于该期刊的记录不会写入文件，也不会被计入"新增"。若服务端返回 `数据服务获取数据异常（feign 服务间调用异常）`，翻页会提前结束并给出提示——此时 `--pages` 并没有跑满，可稍后重试补齐。
 
 ### 获取详情
 
@@ -174,7 +182,7 @@ python gui_app.py
 ```
 
 - **网络状态检测**：启动后自动检测，校园网 IP 认证成功后可搜索和下载；失败时自动降级为匿名会话，可搜索（下载需连接校园网）
-- **搜索**：支持期刊名 / 标题检索，可设置每页数量并获取多页结果，实时显示搜索进度
+- **搜索**：支持期刊名 / 标题检索，可设置起始页、每页数量并获取多页结果，实时显示搜索进度
 - **结果表格**：展示序号、标题、作者、来源、时间、被引、下载，支持关键词筛选、分页与清空
 - **导出 JSON**：将搜索结果导出为 JSON 文件
 - **下载面板**：已提供界面（导入 JSON、开始下载、停止、进度条与统计），下载流程当前以 CLI 为主，详细规划见 `GUI_PLAN.md`
@@ -196,6 +204,7 @@ searcher = CNKISearcher(session)
 papers = searcher.search_by_journal("财政研究")                       # 按期刊
 papers = searcher.search_by_title("预分配视角下的分配体系比较与协同")   # 按标题
 papers = searcher.search_by_journal_all_pages("财政研究", max_pages=5)  # 多页
+papers = searcher.search_by_journal_all_pages("财政研究", max_pages=5, start_page=2)  # 从第 2 页开始
 
 # 保存
 save_json(papers, "papers.json")
@@ -237,7 +246,7 @@ print(f"已更新 {len(updated)} 篇论文的下载状态")
 | 方法 | 说明 |
 | --- | --- |
 | `search_by_journal(name, page, page_size)` | 按期刊名称搜索论文 |
-| `search_by_journal_all_pages(name, max_pages, page_size)` | 搜索期刊所有页论文 |
+| `search_by_journal_all_pages(name, max_pages, page_size, start_page=1)` | 从 `start_page` 开始搜索期刊论文，直到 `max_pages` 结束（默认从第 1 页开始） |
 | `search_by_title(title, page, page_size)` | 按论文标题精准搜索 |
 ### 数据字段
 

@@ -30,6 +30,7 @@ class CNKISearcher:
         self.session = session
         self.parser = PaperParser()
         self.turn_page  = ""
+        self.server_error = False  # 上一页是否因服务端异常而返回空结果
 
     def search(
         self,
@@ -56,8 +57,15 @@ class CNKISearcher:
 
         print(f"搜索请求状态码：{response.status_code}")
         paper_list , turn_page = self.parser.parse_paper_list(response.text)
-        self.turn_page = turn_page
+        # 只在确实解析到 hidTurnPage 时更新，避免空字符串覆盖初始静态令牌
+        if turn_page:
+            self.turn_page = turn_page
+        # 服务端数据服务异常时同样返回空结果，需要与"真的没有更多数据"区分开
+        self.server_error = ('数据服务获取数据异常' in response.text
+                             or 'feign 服务间调用异常' in response.text)
         if paper_list == []:
+            if self.server_error:
+                print("⚠️ 检索被服务端中断：数据服务获取数据异常（feign 服务间调用异常）")
             print("搜索网页text:",response.text)
             
         return paper_list
@@ -110,7 +118,8 @@ class CNKISearcher:
         self,
         journal_name: str,
         max_pages: Optional[int] = None,
-        page_size: int = 20
+        page_size: int = 20,
+        start_page: int = 1
     ) -> List[Paper]:
         """
         搜索所有页面的论文
@@ -119,6 +128,7 @@ class CNKISearcher:
             journal_name: 期刊名称
             max_pages: 最大页数限制，None 表示不限制
             page_size: 每页数量
+            start_page: 起始页码，从该页开始搜索（默认 1）
 
         Returns:
             List[Paper]: 所有论文列表
@@ -126,12 +136,47 @@ class CNKISearcher:
         all_papers = []
         page = 1
 
+        # 当 start_page > 1 时，需先预热建立 turn_page 令牌链。
+        # 策略：必须先请求第 1 页获取初始 hidTurnPage 令牌，
+        # 然后按 1→9→13→17→...（步长 4）跳页，最后回落到 start_page。
+        if start_page > 1:
+            targets = [1]
+            if start_page > 9:
+                targets.append(9)
+                p = 9
+                while p < start_page:
+                    p += 4
+                    targets.append(p)
+            if targets[-1] != start_page:
+                targets.append(start_page)
+
+            for t in targets:
+                print(f"\n正在翻到第 {t} 页（获取翻页令牌，不计入结果）...")
+                papers = self.search_by_journal(journal_name, page=t, page_size=page_size)
+                if not papers:
+                    if self.server_error:
+                        print(f"⚠️ 第 {t} 页服务端报错，无法继续翻页到第 {start_page} 页")
+                    else:
+                        print(f"第 {t} 页无数据，无法继续翻页到第 {start_page} 页")
+                    return all_papers
+                print(f"第 {t} 页翻页令牌已获取")
+
+            print(f"翻页令牌链已就绪，从第 {start_page} 页开始收集结果")
+            page = start_page
+        else:
+            page = 1
+
+        # 正式收集阶段：从 start_page 到 max_pages（或无限制直到没有更多数据）
         while True:
             print(f"\n正在获取第 {page} 页...")
             papers = self.search_by_journal(journal_name, page=page, page_size=page_size)
 
             if not papers:
-                print("没有更多数据")
+                if self.server_error:
+                    print(f"⚠️ 第 {page} 页起服务端报错，翻页提前结束："
+                          f"本次实际只获取 {len(all_papers)} 篇（--pages 未跑满，稍后可重试）")
+                else:
+                    print("没有更多数据")
                 break
 
             all_papers.extend(papers)

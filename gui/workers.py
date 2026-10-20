@@ -66,12 +66,13 @@ class SearchWorker(QObject):
     failed = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, search_type: str, keyword: str, page_count: int, page_size: int):
+    def __init__(self, search_type: str, keyword: str, page_count: int, page_size: int, start_page: int = 1):
         super().__init__()
         self.search_type = search_type
         self.keyword = keyword
         self.page_count = page_count
         self.page_size = page_size
+        self.start_page = start_page
 
     def run(self):
         """执行搜索任务。"""
@@ -79,7 +80,16 @@ class SearchWorker(QObject):
             session = GLOBAL_AUTH.get_session() if GLOBAL_AUTH else None
             searcher = CNKISearcher(session)
             all_papers = []
-            for page in range(1, self.page_count + 1):
+
+            # 当 start_page > 1 且为期刊搜索时，先请求第 1 页获取 turn_page 令牌
+            if self.start_page > 1 and self.search_type == "journal" and not searcher.turn_page:
+                self.page_loaded.emit(1, 0, 0)
+                searcher.search_by_journal(self.keyword, page=1, page_size=self.page_size)
+                if searcher.server_error:
+                    self.failed.emit("获取翻页令牌时服务端报错，无法继续搜索")
+                    return
+
+            for page in range(self.start_page, self.start_page + self.page_count):
                 if self.search_type == "title":
                     papers = searcher.search_by_title(self.keyword, page=page, page_size=self.page_size)
                 else:

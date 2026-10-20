@@ -490,7 +490,10 @@ class PDFDownloader(BaseDownloader):
         random.shuffle(downloadable)
         for i, paper in enumerate(downloadable, 1):
             print(f"\n[{i}/{len(downloadable)}] ", end="")
-
+            if paper.db_type == "视频":
+                print(f"⚠️ 跳过：数据库类型为 视频")
+                results['skipped'] += 1
+                continue
             # 更新状态为下载中
             paper.download_status = "downloading"
 

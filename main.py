@@ -5,6 +5,7 @@
 使用方法:
     python main.py search --journal "财政研究" --output papers.json
     python main.py search --journal "财政研究" --pages 3 --output papers.json
+    python main.py search --journal "财政研究" --start-page 2 --pages 5 --output papers.json
     python main.py download --input papers.json --output-dir output/pdfs
 """
 
@@ -22,8 +23,99 @@ from cnki_downloader import CNKIAuth, CNKISearcher
 from cnki_downloader.downloaders import PDFDownloader
 from cnki_downloader.utils import load_json,save_json,print_paper_summary,file_exists
 
-# 从 output.upload 导入 Uploader 类
-from output.upload import Uploader
+try:
+    # 从 output.upload 导入 Uploader 类
+    from output.upload import Uploader
+except ImportError:
+    print("⚠️ 警告: 无法导入 output.upload.Uploader，上传功能将不可用,此为内部方法。请确保 output/upload.py 存在。")
+    Uploader = None
+
+
+# 增量合并判定依据：标题 + 发表时间（二者都完全相同 → 视为同一篇论文，不新增）
+MERGE_KEY_FIELDS = ('标题', '发表时间')
+
+# 详情/下载阶段的字段：增量合并时保留文件中原值，不被检索结果覆盖
+PRESERVED_FIELDS = frozenset({
+    'DOI', '摘要', '关键词', '作者', '作者单位',
+    'ISSN', 'CN', '页数', '页码范围', '卷号', '期号',
+    '基金', '专辑', '专题', '分类号',
+    '下载状态', '本地PDF路径',
+})
+
+
+def merge_key(paper: dict) -> tuple:
+    """生成增量合并判定键（标题、发表时间）"""
+    return tuple(str(paper.get(field) or '').strip() for field in MERGE_KEY_FIELDS)
+
+
+def merge_search_results(papers: list, existing_papers: list, source: str = "") -> tuple:
+    """按「标题 + 发表时间」把检索结果增量合并进已有论文列表。
+
+    判定规则：标题、发表时间二者都完全相同的论文视为同一篇（不新增），
+    只更新检索字段并保留 PRESERVED_FIELDS 中的详情/下载字段；
+    其余论文作为新论文追加，并按发表时间降序重新编号。
+
+    Args:
+        papers: 本次检索到的 Paper 对象列表
+        existing_papers: 文件中已有的论文字典列表（原地修改）
+        source: 期刊名；非空时只保留该来源的论文（来源不符的检索结果既不新增也不更新）
+
+    Returns:
+        tuple: (合并后的论文列表, 统计字典)
+            统计字典含 added / updated / skipped（检索到但来源不符，未写入）
+            / removed（原文件中来源不符，被清理的行）
+    """
+    # 先按来源清理原有文件，保证统计数字与实际落盘内容一致
+    removed_count = 0
+    if source:
+        kept = [p for p in existing_papers if (p.get('来源') or '') == source]
+        removed_count = len(existing_papers) - len(kept)
+        existing_papers = kept
+
+    paper_index = {merge_key(p): p for p in existing_papers}
+
+    added_count = 0
+    updated_count = 0
+    skipped_count = 0
+
+    for paper in papers:
+        paper_dict = paper.to_dict()
+        if source and (paper_dict.get('来源') or '') != source:
+            # 来源不符：既不新增也不更新，避免"报了新增却没落盘"
+            skipped_count += 1
+            continue
+        pkey = merge_key(paper_dict)
+        existing = paper_index.get(pkey)
+        if existing is not None:
+            # 论文已存在（标题、发表时间都相同），只更新检索字段，保留详情/下载字段
+            for field_name, value in paper_dict.items():
+                # 跳过详情、下载字段，保留原有值
+                if field_name in PRESERVED_FIELDS:
+                    continue
+                # 只更新有值的检索字段
+                if isinstance(value, list):
+                    if value:
+                        existing[field_name] = value
+                elif value and str(value).strip():
+                    existing[field_name] = value
+            updated_count += 1
+        else:
+            # 新论文，追加到列表，并登记进索引以避免同一次运行内重复追加
+            existing_papers.append(paper_dict)
+            paper_index[pkey] = paper_dict
+            added_count += 1
+
+    existing_papers.sort(key=lambda x: x.get('发表时间') or '', reverse=True)
+    for i, p in enumerate(existing_papers):
+        p['序号'] = i + 1
+
+    stats = {
+        'added': added_count,
+        'updated': updated_count,
+        'skipped': skipped_count,
+        'removed': removed_count,
+    }
+    return existing_papers, stats
 
 
 def cmd_search(args):
@@ -41,86 +133,49 @@ def cmd_search(args):
                 papers = searcher.search_by_journal_all_pages(
                     journal_name=args.journal,
                     max_pages=args.pages,
-                    page_size=args.page_size
+                    page_size=args.page_size,
+                    start_page=args.start_page
                 )
             else:
                 papers = searcher.search_by_journal(
                     journal_name=args.journal,
-                    page=args.page,
+                    page=args.start_page,
                     page_size=args.page_size
                 )
         elif args.title:
             print(f"\n📚 搜索标题: {args.title}")
             papers = searcher.search_by_title(
                 title=args.title,
-                page=args.page,
+                page=args.start_page,
                 page_size=args.page_size
             )
         else:
             print("\n📚 使用默认搜索条件")
-            papers = searcher.search(page=args.page, page_size=args.page_size)
+            papers = searcher.search()
 
         # 3. 打印结果
         print_paper_summary(papers)
-        # 4. 保存结果（增量更新）
+        # 4. 保存结果（增量合并）
         output_file = args.output or "papers.json"
         output_path = Path(output_file)
         # 确保目录存在
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if file_exists(output_file):
-            # 增量更新
+            # 增量合并：标题 + 发表时间都相同的论文只更新检索字段，新论文追加
             existing_papers = load_json(output_file)
-            existing_by_title = {p['标题']: p for p in existing_papers}
-            # search 只更新检索字段，不更新详情字段
-            detail_fields = {
-                'DOI', '摘要', '关键词', '作者', '作者单位',
-                'ISSN', 'CN', '页数', '页码范围', '卷号', '期号',
-                '基金', '专辑', '专题', '分类号',
-                '下载状态', '本地PDF路径',
-            }
+            existing_papers, stats = merge_search_results(
+                papers, existing_papers, source=args.journal
+            )
 
-            updated_count = 0
-            added_count = 0
-
-            for paper in papers:
-                paper_dict = paper.to_dict()
-                if paper.title in existing_by_title:
-                    # 论文已存在，只更新检索字段，保留详情信息
-                    existing = existing_by_title[paper.title]
-                    for key, value in paper_dict.items():
-                        # 跳过详情字段，保留原有值
-                        if key in detail_fields:
-                            continue
-                        # 只更新有值的检索字段
-                        if isinstance(value, list):
-                            if value:
-                                existing[key] = value
-                        elif value and str(value).strip():
-                            existing[key] = value
-                    
-                    updated_count += 1
-                else:
-                    # 新论文，添加到列表
-                    existing_papers.append(paper_dict)
-                    added_count += 1
-            # 基于标题去重
-            unique_papers = {}
-            for p in existing_papers:
-                title = p.get('标题')
-                if title not in unique_papers:
-                    unique_papers[title] = p
-            # 按发表时间降序排序并重新编号
-            existing_papers = list(unique_papers.values())
-            existing_papers.sort(key=lambda x: x['发表时间'], reverse=True)
-            for i, p in enumerate(existing_papers):
-                p['序号'] = i + 1
-                
             # 保存整个文件（有新论文或已有更新）
             save_json(existing_papers, output_file)
-            if added_count > 0:
-                print(f"\n📝 增量更新：新增 {added_count} 篇论文，更新 {updated_count} 篇")
+            if stats['added'] > 0:
+                print(f"\n📝 增量合并：新增 {stats['added']} 篇论文，更新 {stats['updated']} 篇")
             else:
-                print(f"\n📝 无新增论文，更新 {updated_count} 篇已存在论文")
+                print(f"\n📝 无新增论文，更新 {stats['updated']} 篇已存在论文")
+            if stats['skipped'] or stats['removed']:
+                print(f"   ↳ 来源不是「{args.journal}」而未写入：检索结果 {stats['skipped']} 篇，"
+                      f"原文件清理 {stats['removed']} 行")
         else:
             save_json(papers, output_file)
 
@@ -322,6 +377,8 @@ def cmd_download(args):
 def cmd_upload(args):
     """上传文献命令"""
     try:
+        
+        category = "宏观经济"
         # 加载 JSON 文件
         json_data = load_json(args.input)
 
@@ -343,15 +400,13 @@ def cmd_upload(args):
         # 先登录，后续循环复用 token
         uploader.login()
         
-        # 首先过滤。过滤掉已经上传的文献，通过check_dois接口过滤
-        dois_to_check = [item.get("DOI") for item in json_data if item.get("DOI")]
-        
-        if not dois_to_check:
-            print("❌ 没有可检查的 DOI")
-            return 1
-
-        missing_dois = uploader.check_dois(dois=dois_to_check)
-
+        # 首先过滤。过滤掉已经上传的文献，通过check接口过滤
+        # 获取json_data的doi列表
+        dois = [item.get("DOI") for item in json_data]
+        titles = [item.get("标题") for item in json_data]
+        # pairs_to_check = [(item.get("title"),item.get("DOI")) for item in json_data if item.get("DOI")]
+    
+        missing_pairs = uploader.check(dois=dois,titles=titles)
         success_count = 0
         already_uploaded_count = 0
         empty_count = 0
@@ -362,10 +417,23 @@ def cmd_upload(args):
         for i, item in enumerate(json_data):
             print(f"\n[{i+1}/{len(json_data)}] 处理中...")
 
-            # 跳过的文献.DOI 为空或缺失
-            if not item.get("DOI") or item.get("DOI").strip() == "":
-                print(f"⚠️ 跳过：缺少 DOI")
-                empty_count += 1
+            # 获取文件路径（必需）
+            file_path = item.get('本地PDF路径')
+            if not file_path:
+                print(f"⚠️ 缺少 本地PDF路径 字段，跳过")
+                fail_count += 1
+                continue
+            
+            # 跳过数据库类型为"视频"的记录
+            if item.get("数据库类型") == "视频":
+                print(f"⚠️ 跳过：数据库类型为 视频")
+                skip_count += 1
+                continue
+
+            # 跳过分类号为空或者为"+"的记录
+            if not item.get("分类号") or item.get("分类号").strip() == "+":
+                print(f"⚠️ 跳过：缺少 分类号 或 分类号为 +")
+                skip_count += 1
                 continue
             
             # 跳过关键词为空或缺失
@@ -374,15 +442,9 @@ def cmd_upload(args):
                 skip_count += 1
                 continue
             
-            # 获取文件路径（必需）
-            file_path = item.get('本地PDF路径')
-            if not file_path:
-                print(f"⚠️ 缺少 本地PDF路径 字段，跳过")
-                fail_count += 1
-                continue
-            
-            # 跳过已存在的 DOI
-            if item.get("DOI") not in missing_dois:
+            print([item.get("标题"),item.get("DOI")])
+            # 存在DOI的同时(title,doi)不在missing_pairs中，说明已经上传过了，跳过
+            if (item.get("DOI") or item.get("标题")) and [item.get("标题"),item.get("DOI")] not in missing_pairs:
                 print(f"⚠️ 跳过：DOI 已存在")
                 already_uploaded_count += 1
                 continue
@@ -405,7 +467,7 @@ def cmd_upload(args):
                     # 如果没有索引，默认取第一个单位。确保affiliations_list不为空
                     if affiliations_list:
                         affiliation_names = affiliations_list[0:1]
-                affiliation = ";".join(affiliation_names)
+                affiliation = ",".join(affiliation_names)
                 authors.append({"name": name, "affiliation": affiliation})
             
             # 构造关键字，列表变字符串  "数据价值链,数字技术,碳外部性,产业数字化"
@@ -416,6 +478,7 @@ def cmd_upload(args):
             # 构建上传参数
             upload_kwargs = {
                 "if_cn": True,  # 假设都是中文文献
+                "category":category,
                 "title": item.get("标题", ""),
                 "journal": item.get("来源", ""),
                 "publish_date": item.get("发表时间", ""),
@@ -470,6 +533,9 @@ def main():
   # 搜索多页结果
   python main.py search --journal "财政研究" --pages 3
 
+  # 从第2页开始搜索，直到第5页结束
+  python main.py search --journal "财政研究" --start-page 2 --pages 5
+
   # 下载 PDF
   python main.py download --input papers.json --output-dir output/pdfs
 
@@ -502,7 +568,13 @@ def main():
     search_parser.add_argument(
         '--pages', '-P',
         type=int,
-        help='获取的最大页数'
+        help='结束页码（绝对页码），搜索范围为止于此页。若未指定start-page，则从第1页开始'
+    )
+    search_parser.add_argument(
+        '--start-page',
+        type=int,
+        default=1,
+        help='起始页码，从该页开始搜索 (默认: 1)'
     )
     search_parser.add_argument(
         '--page-size', '-s',
