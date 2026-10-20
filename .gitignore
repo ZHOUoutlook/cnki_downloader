@@ -1,5 +1,46 @@
-output/
-推荐期刊/
+# ===== Python =====
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+
+# 构建产物
+build/
+dist/
+*.whl
+*.tar.gz
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+
+# ===== IDE / 工具 =====
 .claude/
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== 测试与缓存 =====
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ===== 项目运行时数据 =====
+output/
+*.json
+!pyproject.toml
+
+# ===== 数据/文档（非代码）=====
+推荐期刊/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+Desktop.ini

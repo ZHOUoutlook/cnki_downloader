@@ -7,16 +7,14 @@
 """
 
 import sys
-from pathlib import Path
 
-# 支持从项目目录直接运行
-_project_root = Path(__file__).parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+try:
+    from PyQt6.QtWidgets import QApplication
+except ImportError:
+    print("GUI 需要 PyQt6，请执行：pip install cnki-downloader[gui]")
+    sys.exit(1)
 
-from PyQt6.QtWidgets import QApplication
-
-from cnki_downloader.gui import MainWindow
+from .gui import MainWindow
 
 
 def main():

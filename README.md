@@ -15,41 +15,51 @@
 
 ```
 cnki_downloader/
-├── main.py                 # CLI 入口（search / detail / download / upload）
-├── gui_app.py              # GUI 入口（PyQt6 桌面版）
-├── config.py               # 配置（API 端点、请求头、查询参数模板、超时）
-├── __init__.py             # 包入口，导出公共 API
-├── requirements.txt        # 依赖管理
-├── GUI_PLAN.md             # GUI 开发规划文档
+├── pyproject.toml          # 打包配置（pip install . 安装）
+├── README.md               # 本文件
 ├── LICENSE                 # MIT 许可证
+├── requirements.txt        # 核心依赖
+├── requirements-gui.txt    # GUI 依赖（可选）
+├── requirements-dev.txt    # 开发依赖（可选）
 │
-├── core/                   # 核心功能模块
-│   ├── auth.py             # CNKIAuth - IP 登录 / 匿名会话认证
-│   ├── search.py           # CNKISearcher - 论文搜索（期刊/标题/多页）
-│   └── parser.py           # PaperParser - 检索结果与详情页 HTML 解析
+├── src/
+│   └── cnki_downloader/    # 可安装包
+│       ├── __init__.py     # 包入口，导出公共 API
+│       ├── main.py         # CLI 入口（search / detail / download / upload）
+│       ├── gui_app.py      # GUI 入口（PyQt6 桌面版）
+│       ├── config.py       # 配置（API 端点、请求头、查询参数模板、超时）
+│       ├── upload.py       # 文献上传占位实现（内部工具不随包分发）
+│       │
+│       ├── core/           # 核心功能模块
+│       │   ├── auth.py             # CNKIAuth - IP 登录 / 匿名会话认证
+│       │   ├── search.py           # CNKISearcher - 论文搜索（期刊/标题/多页）
+│       │   ├── parser.py           # PaperParser - 检索结果与详情页 HTML 解析
+│       │   └── pagination.py       # build_warmup_pages - 翻页预热序列构建
+│       │
+│       ├── models/         # 数据模型
+│       │   ├── __init__.py
+│       │   └── paper.py            # Paper, Author - 论文数据类
+│       │
+│       ├── downloaders/    # 下载器模块
+│       │   ├── __init__.py
+│       │   ├── base.py             # BaseDownloader - 下载器基类
+│       │   └── pdf_downloader.py   # PDFDownloader - PDF/CAJ 下载（链接过期自动刷新）
+│       │
+│       ├── gui/            # PyQt6 图形界面模块
+│       │   ├── main_window.py      # 主窗口（搜索、结果表格、下载面板）
+│       │   ├── workers.py          # 后台线程（认证检测、搜索任务）
+│       │   ├── result_model.py     # PaperTableModel - 结果表格模型
+│       │   ├── styles.py           # QSS 样式
+│       │   └── ...                 # 面板/对话框模块（部分为占位）
+│       │
+│       └── utils/          # 工具函数
+│           ├── __init__.py
+│           └── file_utils.py       # JSON 读写、文件名清理等
 │
-├── models/                 # 数据模型
-│   ├── __init__.py
-│   └── paper.py            # Paper, Author - 论文数据类
+├── tests/
+│   └── test_pagination.py  # 翻页预热序列测试
 │
-├── downloaders/            # 下载器模块
-│   ├── __init__.py
-│   ├── base.py             # BaseDownloader - 下载器基类
-│   └── pdf_downloader.py   # PDFDownloader - PDF/CAJ 下载（链接过期自动刷新）
-│
-├── gui/                    # PyQt6 图形界面模块
-│   ├── main_window.py      # 主窗口（搜索、结果表格、下载面板）
-│   ├── workers.py          # 后台线程（认证检测、搜索任务）
-│   ├── result_model.py     # PaperTableModel - 结果表格模型
-│   ├── styles.py           # QSS 样式
-│   └── ...                 # 面板/对话框模块（部分为占位）
-│
-├── utils/                  # 工具函数
-│   ├── __init__.py
-│   └── file_utils.py       # JSON 读写、文件名清理等
-│
-└── output/                 # 输出目录
-    ├── upload.py           # Uploader - 文献批量上传器
+└── output/                 # 输出目录（运行时生成）
     ├── pdfs/               # 下载的 PDF/CAJ，按期刊分子目录
     └── *.json              # 搜索结果数据
 ```
@@ -57,45 +67,59 @@ cnki_downloader/
 ## 安装
 
 ```bash
-pip install -r requirements.txt
+# 以可编辑模式安装为 Python 包（开发）
+pip install -e .
+
+# 正式安装
+pip install .
 ```
 
-依赖：`requests`、`beautifulsoup4`（核心）、`PyQt6`（GUI）。
+可选组件：
+
+```bash
+pip install ".[gui]"     # 安装 PyQt6，启用桌面 GUI
+pip install ".[dev]"     # 安装测试依赖
+```
+
+核心依赖：`requests`、`beautifulsoup4`；GUI 依赖 `PyQt6`（可选）。
 
 ## 快速开始
 
+安装后使用 `cnki` 命令（等价于 `python -m cnki_downloader.main`）：
+
 ```bash
 # 命令行：搜索期刊论文
-python main.py search --journal "财政研究"
+cnki search --journal "财政研究"
 
 # 从第 2 页开始搜索，直到第 5 页结束
-python main.py search --journal "财政研究" --start-page 2 --pages 5
+cnki search --journal "财政研究" --start-page 2 --pages 5
 
-# 桌面版 GUI
-python gui_app.py
+# 桌面版 GUI（需先 pip install ".[gui]"）
+cnki-gui
 ```
+
 ## 使用方法（CLI）
 
 ### 搜索论文
 
 ```bash
 # 按期刊搜索（匿名会话，无需登录）
-python main.py search --journal "财政研究"
+cnki search --journal "财政研究"
 
 # 按标题精准搜索
-python main.py search --title "预分配视角下的分配体系比较与协同"
+cnki search --title "预分配视角下的分配体系比较与协同"
 
 # 获取多页结果
-python main.py search --journal "财政研究" --pages 3
+cnki search --journal "财政研究" --pages 3
 
 # 从第 2 页开始搜索，直到第 5 页结束
-python main.py search --journal "财政研究" --start-page 2 --pages 5
+cnki search --journal "财政研究" --start-page 2 --pages 5
 
 # 指定起始页码与每页数量
-python main.py search --journal "财政研究" --start-page 2 --page-size 50
+cnki search --journal "财政研究" --start-page 2 --page-size 50
 
 # 指定输出文件（默认 papers.json，保存到 output/ 目录）
-python main.py search --journal "经济学(季刊)" --output "经济学(季刊).json" --pages 50
+cnki search --journal "经济学(季刊)" --output "经济学(季刊).json" --pages 50
 ```
 
 > **增量合并说明**：`search` 会按「标题 + 发表时间」对输出文件做增量合并——**标题、发表时间两者都完全相同**的论文视为同一篇（不新增），仅刷新检索字段（详情链接、下载链接、HTML/AI 阅读链接、被引、下载次数、数据库类型、来源等），保留详情与下载字段（摘要、DOI、关键词、作者、作者单位、卷号、期号、页码范围、分类号、下载状态、本地PDF路径等，其中下载状态由 `download` 阶段维护，不会被检索结果重置）；任一不同的论文作为新论文自动追加，最后按发表时间降序重新编号（同一次运行内重复抓到的论文只追加一次）。
@@ -106,7 +130,7 @@ python main.py search --journal "经济学(季刊)" --output "经济学(季刊).
 
 ```bash
 # 从 JSON 文件加载论文，补充摘要、关键词、作者单位、DOI 等详情字段
-python main.py detail --input output/财政研究.json
+cnki detail --input output/财政研究.json
 ```
 
 > **说明**：`detail` 需要 IP 登录（校园网）访问详情页；仅当论文缺少摘要时才重新抓取；结果直接写回输入文件。
@@ -115,20 +139,20 @@ python main.py detail --input output/财政研究.json
 
 ```bash
 # 下载论文 PDF（默认按输入文件名分类保存）
-python main.py download --input output/财政研究.json   # → output/pdfs/财政研究/
-python main.py download --input output/经济研究.json   # → output/pdfs/经济研究/
+cnki download --input output/财政研究.json   # → output/pdfs/财政研究/
+cnki download --input output/经济研究.json   # → output/pdfs/经济研究/
 
 # 指定自定义目录（不自动分类）
-python main.py download --input papers.json --output-dir my_pdfs
+cnki download --input papers.json --output-dir my_pdfs
 
 # 限制下载数量
-python main.py download --input papers.json --limit 10
+cnki download --input papers.json --limit 10
 
 # 设置下载延迟（默认 10 秒）
-python main.py download --input papers.json --delay 20
+cnki download --input papers.json --delay 20
 
 # 只更新下载状态，不实际下载文件
-python main.py download --input papers.json --skip_download
+cnki download --input papers.json --skip_download
 ```
 
 > **下载说明**：
@@ -144,10 +168,10 @@ python main.py download --input papers.json --skip_download
 
 ```bash
 # 批量上传文献（JSON 中的多篇文献）
-python main.py upload --input output/papers.json
+cnki upload --input output/papers.json
 
 # 指定文献管理 API 地址
-python main.py upload --input output/papers.json --base-url http://localhost:8000
+cnki upload --input output/papers.json --base-url http://localhost:8000
 ```
 
 > **上传规则**：自动跳过缺少 `DOI`、`关键词` 或 `本地PDF路径` 的条目；上传前调用 `check_dois` 接口统计已存在的文献；重复文件由上传接口识别并跳过。
@@ -175,13 +199,15 @@ python main.py upload --input output/papers.json --base-url http://localhost:800
   }
 ]
 ```
+
 ## 使用方法（GUI）
 
 ```bash
-python gui_app.py
+# 安装 GUI 依赖后（pip install ".[gui]"）
+cnki-gui
 ```
 
-- **网络状态检测**：启动后自动检测，校园网 IP 认证成功后可搜索和下载；失败时自动降级为匿名会话，可搜索（下载需连接校园网）
+- **网络状态检测**：启动后自动检测，校园网 IP 认证后可编辑和下载；失败时自动降级为匿名会话，可搜索（下载需连接校园网）
 - **搜索**：支持期刊名 / 标题检索，可设置起始页、每页数量并获取多页结果，实时显示搜索进度
 - **结果表格**：展示序号、标题、作者、来源、时间、被引、下载，支持关键词筛选、分页与清空
 - **导出 JSON**：将搜索结果导出为 JSON 文件
@@ -248,6 +274,7 @@ print(f"已更新 {len(updated)} 篇论文的下载状态")
 | `search_by_journal(name, page, page_size)` | 按期刊名称搜索论文 |
 | `search_by_journal_all_pages(name, max_pages, page_size, start_page=1)` | 从 `start_page` 开始搜索期刊论文，直到 `max_pages` 结束（默认从第 1 页开始） |
 | `search_by_title(title, page, page_size)` | 按论文标题精准搜索 |
+
 ### 数据字段
 
 #### Paper 模型字段

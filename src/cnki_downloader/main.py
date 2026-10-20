@@ -14,20 +14,15 @@ import sys
 from pathlib import Path
 import json
 
-# 支持从项目目录直接运行
-_project_root = Path(__file__).parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-from cnki_downloader import CNKIAuth, CNKISearcher
-from cnki_downloader.downloaders import PDFDownloader
-from cnki_downloader.utils import load_json,save_json,print_paper_summary,file_exists
+from . import CNKIAuth, CNKISearcher
+from .downloaders import PDFDownloader
+from .utils import load_json, save_json, print_paper_summary, file_exists
 
 try:
-    # 从 output.upload 导入 Uploader 类
-    from output.upload import Uploader
+    # 上传模块为内部工具，可选依赖
+    from .upload import Uploader
 except ImportError:
-    print("⚠️ 警告: 无法导入 output.upload.Uploader，上传功能将不可用,此为内部方法。请确保 output/upload.py 存在。")
+    print("⚠️ 警告: 无法导入 upload.Uploader，上传功能将不可用,此为内部方法。请确保 upload.py 存在。")
     Uploader = None
 
 

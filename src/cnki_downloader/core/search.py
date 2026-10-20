@@ -15,6 +15,7 @@ from ..config import (
 )
 from ..models import Paper
 from .parser import PaperParser
+from .pagination import build_warmup_pages
 
 
 class CNKISearcher:
@@ -140,15 +141,7 @@ class CNKISearcher:
         # 策略：必须先请求第 1 页获取初始 hidTurnPage 令牌，
         # 然后按 1→9→13→17→...（步长 4）跳页，最后回落到 start_page。
         if start_page > 1:
-            targets = [1]
-            if start_page > 9:
-                targets.append(9)
-                p = 9
-                while p < start_page:
-                    p += 4
-                    targets.append(p)
-            if targets[-1] != start_page:
-                targets.append(start_page)
+            targets = build_warmup_pages(start_page)
 
             for t in targets:
                 print(f"\n正在翻到第 {t} 页（获取翻页令牌，不计入结果）...")

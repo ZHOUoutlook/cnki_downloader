@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cnki-downloader"
+version = "0.1.0"
+description = "CNKI 知网论文检索、详情获取与 PDF 下载工具"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "cnki_downloader" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests>=2.28.0",
+    "beautifulsoup4>=4.11.0",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt6>=6.5.0"]
+dev = ["pytest>=7.0", "pytest-mock>=3.0", "responses>=0.23"]
+
+[project.scripts]
+cnki = "cnki_downloader.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["cnki_downloader*"]
+
+[tool.setuptools.package-data]
+cnki_downloader = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
