@@ -13,6 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 import json
+from urllib.parse import urljoin
 
 from . import CNKIAuth, CNKISearcher
 from .downloaders import PDFDownloader
@@ -181,6 +182,72 @@ def cmd_search(args):
         return 1
 
 
+def fetch_author_codes(session, paper, code_cache):
+    """使用匿名会话逐个补齐作者编码，仅按主页链接复用成功结果。"""
+    from .core.parser import PaperParser
+    from .config import DEFAULT_HEADERS, REQUEST_TIMEOUT
+
+    detail_url = urljoin('https://kns.cnki.net/', paper.detail_url)
+    headers = {
+        "User-Agent": DEFAULT_HEADERS["User-Agent"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": detail_url,
+    }
+    for author in paper.authors:
+        if author.au_code or not author.profile_url:
+            continue
+        url = urljoin(detail_url, author.profile_url)
+        if url in code_cache:
+            author.au_code = code_cache[url]
+            continue
+        print(f"🌐 正在获取作者编码: {author.name}")
+        try:
+            resp = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
+                resp.encoding = resp.apparent_encoding or 'utf-8'
+            code = PaperParser.parse_author_code(resp.text)
+            if code:
+                author.au_code = code
+                code_cache[url] = code
+                print(f"✅ {author.name} au-code: {code}")
+            else:
+                print(f"⚠️ 作者页面未找到 au-code: {author.name}")
+        except Exception as e:
+            print(f"⚠️ 作者编码获取失败（{author.name}）: {e}")
+
+
+def cmd_author(args):
+    """根据已有作者主页链接补齐 au-code，不请求文献详情页。"""
+    try:
+        from .models import Paper
+
+        papers_data = load_json(args.input)
+        papers = [Paper.from_dict(p) for p in papers_data]
+        if not papers:
+            print("❌ JSON 文件中没有论文数据")
+            return 1
+
+        auth = CNKIAuth()
+        session = auth.anonymous_login()
+
+        print(f"\n📄 共 {len(papers)} 篇论文，正在补齐作者编码")
+        code_cache = {}
+        for paper, data in zip(papers, papers_data):
+            fetch_author_codes(session, paper, code_cache)
+            # 独立命令只更新作者编码，保留原文件中的其余字段。
+            for author, author_data in zip(paper.authors, data.get('作者', [])):
+                author_data['au_code'] = author.au_code
+
+        save_json(papers_data, args.input)
+        print(f"\n💾 已保存作者编码到: {args.input}")
+        print("提示：无作者主页链接时，请先运行 detail 补全文献信息。")
+        return 0
+    except Exception as e:
+        print(f"❌ 获取作者编码失败: {e}")
+        return 1
+
+
 def cmd_detail(args):
     """显示论文详情命令"""
     try:
@@ -196,18 +263,18 @@ def cmd_detail(args):
             print("❌ JSON 文件中没有论文数据")
             return 1
 
-        # 使用 IP 登录（需要完整的认证 cookies 访问详情页）
+        # 详情页使用匿名会话，无需校园网 IP 认证。
         auth = CNKIAuth()
-        session = auth.ip_login()
-        if not auth.is_authenticated():
-            print("❌ 登录失败")
-            return 1
+        session = auth.anonymous_login()
 
         print(f"\n📄 共 {len(papers)} 篇论文")
 
         for paper in papers:
-            # 仅当缺少详情时才重新抓取详情页
-            if paper.detail_url and (paper.abstract == "" or paper.volume == "" or paper.issue == ""):
+            # 缺少作者编码时刷新主页链接，供后续 author 命令使用。
+            needs_author_urls = not paper.authors or any(not a.au_code for a in paper.authors)
+            if paper.detail_url and (
+                paper.abstract == "" or paper.volume == "" or paper.issue == "" or needs_author_urls
+            ):
                 print(f"\n🌐 正在获取详情页: {paper.detail_url}")
                 try:
                     # 处理相对 URL
@@ -247,6 +314,13 @@ def cmd_detail(args):
                         ):
                             value = detail_info.get(attr)
                             if value:  # 跳过 None / '' / []
+                                if attr == 'authors':
+                                    # 详情链接刷新后仍保留已有编码；同名作者有歧义时重新获取。
+                                    for author in value:
+                                        previous = [a for a in paper.authors if a.name == author.name]
+                                        if (len(previous) == 1
+                                                and sum(a.name == author.name for a in value) == 1):
+                                            author.au_code = previous[0].au_code
                                 setattr(paper, attr, value)
                         print(f"✅ 详情页获取成功")
                 except Exception as e:
@@ -534,6 +608,9 @@ def main():
   # 下载 PDF
   python main.py download --input papers.json --output-dir output/pdfs
 
+  # 获取作者编码（先通过 detail 获取作者主页链接）
+  cnki author --input papers.json
+
   # 下载前 10 篇
   python main.py download --input papers.json --limit 10
 
@@ -591,6 +668,14 @@ def main():
         help='论文 JSON 文件'
     )
 
+    # author 子命令
+    author_parser = subparsers.add_parser('author', help='获取作者 au-code')
+    author_parser.add_argument(
+        '--input', '-i',
+        required=True,
+        help='包含作者主页链接的论文 JSON 文件'
+    )
+
     # download 子命令
     download_parser = subparsers.add_parser('download', help='下载 PDF')
     download_parser.add_argument(
@@ -645,6 +730,8 @@ def main():
         return cmd_download(args)
     elif args.command == 'detail':
         return cmd_detail(args)
+    elif args.command == 'author':
+        return cmd_author(args)
     elif args.command == 'upload':
         return cmd_upload(args)
 

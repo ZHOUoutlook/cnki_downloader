@@ -10,6 +10,16 @@ class PaperParser:
     """论文 HTML 解析器"""
 
     @staticmethod
+    def parse_author_code(html_content: str) -> str:
+        """从作者主页的 au-code 字段提取作者编码。"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        element = soup.select_one('#au-code, [name="au-code"], [au-code]')
+        if element is None:
+            return ''
+        return (element.get('value') or element.get('au-code')
+                or element.get_text(strip=True)).strip()
+
+    @staticmethod
     def parse_paper_list(html_content: str) -> List[Paper]:
         """
         解析知网检索结果 HTML，返回结构化论文列表
