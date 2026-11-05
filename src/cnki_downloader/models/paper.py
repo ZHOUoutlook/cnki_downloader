@@ -10,6 +10,7 @@ class Author:
     name: str
     profile_url: str = ""
     affiliation_indices: str = ""  # 作者所属单位的序号，如 "1,2" 表示属于第1和第2个单位
+    au_code: str = ""  # 作者主页中的 au-code，保留前导零
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -98,7 +99,8 @@ class Paper:
                     authors.append(Author(
                         name=a.get('name', a.get('作者名', '')),
                         profile_url=a.get('profile_url', a.get('作者主页链接', '')),
-                        affiliation_indices=a.get('affiliation_indices', '')
+                        affiliation_indices=a.get('affiliation_indices', ''),
+                        au_code=a.get('au_code', a.get('au-code', '')) or ''
                     ))
                 else:
                     authors.append(a)
