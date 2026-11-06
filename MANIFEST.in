@@ -1,0 +1,5 @@
+include LICENSE README.md CONTRIBUTORS.md
+include requirements*.txt
+recursive-include docs/releases *.md
+recursive-include packaging/windows *.py *.iss *.md *.ico
+include scripts/build-msi.py scripts/build-windows.ps1

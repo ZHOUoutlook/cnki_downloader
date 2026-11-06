@@ -50,6 +50,8 @@
 
 ## 安装
 
+Windows 用户可以运行 `dist/CNKI-Paper-Assistant-0.2.0-Setup-x64.msi` 安装桌面版，无需安装 Python。构建与验证方法见 [Windows 安装包说明](packaging/windows/README.md)。
+
 ### 方式一：从 Git 仓库安装（推荐开发者使用）
 
 ```bash
