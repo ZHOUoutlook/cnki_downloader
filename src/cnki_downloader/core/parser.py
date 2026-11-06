@@ -204,7 +204,7 @@ class PaperParser:
             author_div = soup.select_one('.wx-tit')
             if author_div:
                 author_elements = author_div.select('h3.author')
-                if len(author_elements) >= 2:
+                if author_elements:
                     # 第一个 h3.author：解析作者名和superscript索引
                     authors = []
                     first_h3 = author_elements[0]
@@ -238,21 +238,22 @@ class PaperParser:
                     if authors:
                         result['authors'] = authors
 
-                    # 第二个 h3.author：解析作者单位
-                    org_list = []
-                    second_h3 = author_elements[1]
-                    for span in second_h3.select('span'):
-                        org_link = span.select_one('a')
-                        if org_link:
-                            org_text = org_link.get_text(strip=True)
-                        else:
-                            org_text = span.get_text(strip=True)
-                        # 去掉开头的序号，如 "1." "2." 等
-                        org_text = re.sub(r'^\d+\.\s*', '', org_text)
-                        if org_text:
-                            org_list.append(org_text)
-                    if org_list:
-                        result['author_org'] = org_list
+                    if len(author_elements) >= 2:
+                        # 第二个 h3.author：解析作者单位
+                        org_list = []
+                        second_h3 = author_elements[1]
+                        for span in second_h3.select('span'):
+                            org_link = span.select_one('a')
+                            if org_link:
+                                org_text = org_link.get_text(strip=True)
+                            else:
+                                org_text = span.get_text(strip=True)
+                            # 去掉开头的序号，如 "1." "2." 等
+                            org_text = re.sub(r'^\d+\.\s*', '', org_text)
+                            if org_text:
+                                org_list.append(org_text)
+                        if org_list:
+                            result['author_org'] = org_list
 
             # 8. 基金
             fund_elem = soup.select_one('.funds')

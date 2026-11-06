@@ -1,6 +1,8 @@
 """CNKI 论文搜索模块"""
 
 import json
+import time
+from copy import deepcopy
 import requests
 from typing import Optional, List
 
@@ -49,27 +51,34 @@ class CNKISearcher:
             List[Paper]: 论文列表
         """
         payload = (query or JOURNAL_PAYLOAD).copy()
-        response = self.session.post(
-            TARGET_API,
-            data=payload,
-            headers=SEARCH_HEADERS,
-            timeout=REQUEST_TIMEOUT
-        )
+        # 首次请求之外再重试三次；保持页码与请求参数不变。
+        for attempt in range(4):
+            if attempt:
+                print(f"⚠️ 第 {payload.get('pageNum', '1')} 页结果为空，"
+                      f"1 秒后重试 ({attempt}/3)...")
+                time.sleep(1)
+            response = self.session.post(
+                TARGET_API,
+                data=payload,
+                headers=SEARCH_HEADERS,
+                timeout=REQUEST_TIMEOUT
+            )
 
-        print(f"搜索请求状态码：{response.status_code}")
-        paper_list , turn_page = self.parser.parse_paper_list(response.text)
-        # 只在确实解析到 hidTurnPage 时更新，避免空字符串覆盖初始静态令牌
-        if turn_page:
-            self.turn_page = turn_page
-        # 服务端数据服务异常时同样返回空结果，需要与"真的没有更多数据"区分开
-        self.server_error = ('数据服务获取数据异常' in response.text
-                             or 'feign 服务间调用异常' in response.text)
-        if paper_list == []:
-            if self.server_error:
-                print("⚠️ 检索被服务端中断：数据服务获取数据异常（feign 服务间调用异常）")
-            print("搜索网页text:",response.text)
-            
-        return paper_list
+            print(f"搜索请求状态码：{response.status_code}")
+            paper_list, turn_page = self.parser.parse_paper_list(response.text)
+            self.server_error = ('数据服务获取数据异常' in response.text
+                                 or 'feign 服务间调用异常' in response.text)
+            if paper_list:
+                # 空响应不覆盖上一次有效的翻页令牌。
+                if turn_page:
+                    self.turn_page = turn_page
+                return paper_list
+
+        print(f"⚠️ 第 {payload.get('pageNum', '1')} 页重试 3 次后仍为空，提前返回")
+        if self.server_error:
+            print("⚠️ 检索被服务端中断：数据服务获取数据异常（feign 服务间调用异常）")
+        print("搜索网页text:", response.text)
+        return []
 
     def search_by_journal(
         self,
@@ -89,7 +98,7 @@ class CNKISearcher:
             List[Paper]: 论文列表
         """
         payload = JOURNAL_PAYLOAD.copy()
-        query_json = JOURNAL_QUERY.copy()
+        query_json = deepcopy(JOURNAL_QUERY)
         query_json["QNode"]["QGroup"][0]["Items"][0]["Value"] = journal_name
         # query_json["QNode"]["QGroup"][0]["ChildItems"][0]["Items"][0]["value"] = journal_name
 
@@ -169,7 +178,8 @@ class CNKISearcher:
                     print(f"⚠️ 第 {page} 页起服务端报错，翻页提前结束："
                           f"本次实际只获取 {len(all_papers)} 篇（--pages 未跑满，稍后可重试）")
                 else:
-                    print("没有更多数据")
+                    print(f"第 {page} 页重试后仍无数据，翻页提前结束："
+                          f"本次实际获取 {len(all_papers)} 篇")
                 break
 
             all_papers.extend(papers)
@@ -201,8 +211,15 @@ class CNKISearcher:
             List[Paper]: 论文列表
         """
         payload = TITLE_PAYLOAD.copy()
-        query_json = TITLE_QUERY.copy()
+        query_json = deepcopy(TITLE_QUERY)
         query_json["QNode"]["QGroup"][0]["Items"][0]["Value"] = title
+        payload['pageNum'] = str(page)
+        payload['CurPage'] = str(page)
+        payload['pageSize'] = str(page_size)
+        if page > 1:
+            payload['boolSearch'] = 'false'
+            payload['turnpage'] = self.turn_page
+            query_json['SearchFrom'] = 4
         payload["QueryJson"] = json.dumps(query_json, ensure_ascii=False)
         # 模糊
         # payload["aside"] = f"篇名：{title}"  

@@ -13,11 +13,15 @@ import argparse
 import sys
 from pathlib import Path
 import json
+import math
+import time
+from copy import deepcopy
 from urllib.parse import urljoin
 
 from . import CNKIAuth, CNKISearcher
 from .downloaders import PDFDownloader
 from .utils import load_json, save_json, print_paper_summary, file_exists
+from .core.access import AccessBlocked, check_access
 
 try:
     # 上传模块为内部工具，可选依赖
@@ -44,9 +48,41 @@ def merge_key(paper: dict) -> tuple:
     return tuple(str(paper.get(field) or '').strip() for field in MERGE_KEY_FIELDS)
 
 
+def _combine_duplicate(existing: dict, duplicate: dict) -> None:
+    """保留首条记录，补齐重复项的信息，避免丢失作者编码及下载结果。"""
+    for field, value in duplicate.items():
+        if value and not existing.get(field):
+            existing[field] = deepcopy(value)
+
+    # 仅对两边都唯一的同名作者补字段，避免同名作者串用编码。
+    authors = existing.get('作者') or []
+    other_authors = duplicate.get('作者') or []
+    for author in authors:
+        if not isinstance(author, dict):
+            continue
+        name = author.get('name', author.get('作者名', ''))
+        matches = [a for a in other_authors if isinstance(a, dict)
+                   and a.get('name', a.get('作者名', '')) == name]
+        if name and len(matches) == 1 and sum(
+            isinstance(a, dict) and a.get('name', a.get('作者名', '')) == name
+            for a in authors
+        ) == 1:
+            for field, value in matches[0].items():
+                if value and not author.get(field):
+                    author[field] = deepcopy(value)
+
+    for field in ('下载', '被引'):
+        existing[field] = max(int(existing.get(field) or 0), int(duplicate.get(field) or 0))
+    if duplicate.get('下载状态') == 'completed':
+        if existing.get('下载状态') != 'completed' and duplicate.get('本地PDF路径'):
+            existing['本地PDF路径'] = duplicate['本地PDF路径']
+        existing['下载状态'] = 'completed'
+
+
 def merge_search_results(papers: list, existing_papers: list, source: str = "") -> tuple:
     """按「标题 + 发表时间」把检索结果增量合并进已有论文列表。
 
+    先合并原有列表中的重复记录，补齐缺失字段并保留已完成的下载。
     判定规则：标题、发表时间二者都完全相同的论文视为同一篇（不新增），
     只更新检索字段并保留 PRESERVED_FIELDS 中的详情/下载字段；
     其余论文作为新论文追加，并按发表时间降序重新编号。
@@ -59,7 +95,7 @@ def merge_search_results(papers: list, existing_papers: list, source: str = "") 
     Returns:
         tuple: (合并后的论文列表, 统计字典)
             统计字典含 added / updated / skipped（检索到但来源不符，未写入）
-            / removed（原文件中来源不符，被清理的行）
+            / removed（原文件中来源不符，被清理的行）/ deduplicated（历史重复行）
     """
     # 先按来源清理原有文件，保证统计数字与实际落盘内容一致
     removed_count = 0
@@ -68,7 +104,18 @@ def merge_search_results(papers: list, existing_papers: list, source: str = "") 
         removed_count = len(existing_papers) - len(kept)
         existing_papers = kept
 
-    paper_index = {merge_key(p): p for p in existing_papers}
+    paper_index = {}
+    unique_papers = []
+    duplicate_count = 0
+    for paper in existing_papers:
+        key = merge_key(paper)
+        if key in paper_index:
+            _combine_duplicate(paper_index[key], paper)
+            duplicate_count += 1
+        else:
+            paper_index[key] = paper
+            unique_papers.append(paper)
+    existing_papers[:] = unique_papers
 
     added_count = 0
     updated_count = 0
@@ -110,6 +157,7 @@ def merge_search_results(papers: list, existing_papers: list, source: str = "") 
         'updated': updated_count,
         'skipped': skipped_count,
         'removed': removed_count,
+        'deduplicated': duplicate_count,
     }
     return existing_papers, stats
 
@@ -156,24 +204,20 @@ def cmd_search(args):
         output_path = Path(output_file)
         # 确保目录存在
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        if file_exists(output_file):
-            # 增量合并：标题 + 发表时间都相同的论文只更新检索字段，新论文追加
-            existing_papers = load_json(output_file)
-            existing_papers, stats = merge_search_results(
-                papers, existing_papers, source=args.journal
-            )
-
-            # 保存整个文件（有新论文或已有更新）
-            save_json(existing_papers, output_file)
-            if stats['added'] > 0:
-                print(f"\n📝 增量合并：新增 {stats['added']} 篇论文，更新 {stats['updated']} 篇")
-            else:
-                print(f"\n📝 无新增论文，更新 {stats['updated']} 篇已存在论文")
-            if stats['skipped'] or stats['removed']:
-                print(f"   ↳ 来源不是「{args.journal}」而未写入：检索结果 {stats['skipped']} 篇，"
-                      f"原文件清理 {stats['removed']} 行")
+        existing_papers = load_json(output_file) if file_exists(output_file) else []
+        existing_papers, stats = merge_search_results(
+            papers, existing_papers, source=args.journal
+        )
+        save_json(existing_papers, output_file)
+        if stats['added'] > 0:
+            print(f"\n📝 增量合并：新增 {stats['added']} 篇论文，更新 {stats['updated']} 篇")
         else:
-            save_json(papers, output_file)
+            print(f"\n📝 无新增论文，更新 {stats['updated']} 篇已存在论文")
+        if stats['deduplicated']:
+            print(f"   ↳ 已合并原文件中的 {stats['deduplicated']} 条重复记录")
+        if stats['skipped'] or stats['removed']:
+            print(f"   ↳ 来源不是「{args.journal}」而未写入：检索结果 {stats['skipped']} 篇，"
+                  f"原文件清理 {stats['removed']} 行")
 
         return 0
 
@@ -182,7 +226,7 @@ def cmd_search(args):
         return 1
 
 
-def fetch_author_codes(session, paper, code_cache):
+def fetch_author_codes(session, paper, code_cache, delay=3):
     """使用匿名会话逐个补齐作者编码，仅按主页链接复用成功结果。"""
     from .core.parser import PaperParser
     from .config import DEFAULT_HEADERS, REQUEST_TIMEOUT
@@ -202,10 +246,12 @@ def fetch_author_codes(session, paper, code_cache):
             continue
         print(f"🌐 正在获取作者编码: {author.name}")
         try:
+            time.sleep(delay)
             resp = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
             if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
                 resp.encoding = resp.apparent_encoding or 'utf-8'
+            check_access(resp)
+            resp.raise_for_status()
             code = PaperParser.parse_author_code(resp.text)
             if code:
                 author.au_code = code
@@ -213,15 +259,22 @@ def fetch_author_codes(session, paper, code_cache):
                 print(f"✅ {author.name} au-code: {code}")
             else:
                 print(f"⚠️ 作者页面未找到 au-code: {author.name}")
+        except AccessBlocked:
+            print(f"需要人工检查的作者：{author.name}，主页：{url}")
+            raise
         except Exception as e:
             print(f"⚠️ 作者编码获取失败（{author.name}）: {e}")
 
 
 def cmd_author(args):
     """根据已有作者主页链接补齐 au-code，不请求文献详情页。"""
+    session = None
     try:
         from .models import Paper
 
+        delay = getattr(args, 'delay', 3)
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError('请求间隔必须为非负有限秒数')
         papers_data = load_json(args.input)
         papers = [Paper.from_dict(p) for p in papers_data]
         if not papers:
@@ -233,11 +286,20 @@ def cmd_author(args):
 
         print(f"\n📄 共 {len(papers)} 篇论文，正在补齐作者编码")
         code_cache = {}
-        for paper, data in zip(papers, papers_data):
-            fetch_author_codes(session, paper, code_cache)
-            # 独立命令只更新作者编码，保留原文件中的其余字段。
-            for author, author_data in zip(paper.authors, data.get('作者', [])):
-                author_data['au_code'] = author.au_code
+        try:
+            for paper, data in zip(papers, papers_data):
+                try:
+                    fetch_author_codes(session, paper, code_cache, delay=delay)
+                finally:
+                    # 中途被验证拦截时，同篇中已经取得的编码也要保留。
+                    for author, author_data in zip(paper.authors, data.get('作者', [])):
+                        author_data['au_code'] = author.au_code
+        except (AccessBlocked, KeyboardInterrupt) as exc:
+            save_json(papers_data, args.input)
+            print(f"\n⚠️ 作者编码任务已停止：{exc or '用户中断'}")
+            print('已保存取得的编码。验证或访问限制解除后，可重新运行同一命令；已有编码会跳过。')
+            print('浏览器验证状态不会自动传给本命令的匿名会话。')
+            return 1
 
         save_json(papers_data, args.input)
         print(f"\n💾 已保存作者编码到: {args.input}")
@@ -246,6 +308,9 @@ def cmd_author(args):
     except Exception as e:
         print(f"❌ 获取作者编码失败: {e}")
         return 1
+    finally:
+        if session is not None:
+            session.close()
 
 
 def cmd_detail(args):
@@ -253,6 +318,7 @@ def cmd_detail(args):
     try:
         from cnki_downloader.models import Paper
         from cnki_downloader.core.parser import PaperParser
+        from .core.enrichment import skip_detail
         from cnki_downloader.config import REQUEST_TIMEOUT
 
         # 加载论文数据
@@ -269,14 +335,23 @@ def cmd_detail(args):
 
         print(f"\n📄 共 {len(papers)} 篇论文")
 
+        skipped_details = [skip_detail(p) for p in papers]
         for paper in papers:
+            if skip_detail(paper):
+                print(f'跳过【{paper.seq}】{paper.title}：摘要以 <正> 开头')
+                continue
             # 缺少作者编码时刷新主页链接，供后续 author 命令使用。
             needs_author_urls = not paper.authors or any(not a.au_code for a in paper.authors)
             if paper.detail_url and (
                 paper.abstract == "" or paper.volume == "" or paper.issue == "" or needs_author_urls
             ):
-                print(f"\n🌐 正在获取详情页: {paper.detail_url}")
+                print(f"\n🌐 正在处理论文详情: {paper.title}")
                 try:
+                    if needs_author_urls:
+                        from .core.enrichment import refresh_detail_url
+                        print('缺少作者编码，正在重新检索当前论文的详情链接...')
+                        paper.detail_url = refresh_detail_url(session, paper)
+                    old_author_urls = {a.name: a.profile_url for a in paper.authors if not a.au_code}
                     # 处理相对 URL
                     url = paper.detail_url
                     if url.startswith('//'):
@@ -297,13 +372,18 @@ def cmd_detail(args):
                         "Sec-Fetch-Site": "same-site",
                         "Referer": "https://kns.cnki.net/kns8s/defaultresult/index",
                     }
+                    print(f"正在获取当前详情页: {url}")
                     resp = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
                     # 尊重服务器声明的编码；缺失时退回 apparent_encoding
                     if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
                         resp.encoding = resp.apparent_encoding or 'utf-8'
                         
                     print(f"HTTP 状态码: {resp.status_code}")
+                    check_access(resp)
+                    resp.raise_for_status()
                     detail_info = PaperParser.parse_paper_detail(resp.text)
+                    if not detail_info:
+                        raise ValueError('详情页没有可解析的信息，保留原作者链接')
                     print(f"解析到的详情信息: {detail_info}")
                     if detail_info:
                         for attr in (
@@ -321,7 +401,14 @@ def cmd_detail(args):
                                         if (len(previous) == 1
                                                 and sum(a.name == author.name for a in value) == 1):
                                             author.au_code = previous[0].au_code
+                                            author.profile_url = author.profile_url or previous[0].profile_url
                                 setattr(paper, attr, value)
+                        if needs_author_urls:
+                            changed = sum(bool(a.profile_url) and a.profile_url != old_author_urls.get(a.name, '')
+                                          for a in paper.authors if not a.au_code)
+                            print(f'作者主页链接实际更新 {changed} 个')
+                            if not changed:
+                                print('⚠️ 当前详情页未提供变化的作者链接，不能保证旧链接已经刷新')
                         print(f"✅ 详情页获取成功")
                 except Exception as e:
                     print(f"⚠️ 详情页获取失败: {e}")
@@ -362,7 +449,8 @@ def cmd_detail(args):
                 print(f"{'='*60}")
 
         # 保存更新后的数据到 JSON 文件
-        updated_data = [p.to_dict() for p in papers]
+        updated_data = [raw if skipped else p.to_dict()
+                        for p, raw, skipped in zip(papers, papers_data, skipped_details)]
         save_json(updated_data, args.input)
         print(f"\n💾 已保存详情到: {args.input}")
 
@@ -670,6 +758,8 @@ def main():
 
     # author 子命令
     author_parser = subparsers.add_parser('author', help='获取作者 au-code')
+    author_parser.add_argument('--delay', '-d', type=float, default=3,
+                               help='作者页面请求间隔（秒），默认 3 秒')
     author_parser.add_argument(
         '--input', '-i',
         required=True,
