@@ -13,6 +13,7 @@ from ..core.auth import CNKIAuth
 from ..core.search import CNKISearcher
 from ..core.pagination import build_warmup_pages
 from ..core.enrichment import needs_detail, fetch_detail, fetch_codes
+from ..core.access import AccessBlocked
 from ..downloaders import PDFDownloader
 
 
@@ -209,6 +210,10 @@ class PaperTaskWorker(TaskWorker):
                             paper.local_pdf_path = str(path)
                             paper.download_status = 'completed'
                             success += 1
+                except AccessBlocked:
+                    # 保存当前论文已取得的编码及刷新后的 URL，然后停止整批请求。
+                    self.paper_updated.emit(index, deepcopy(paper))
+                    raise
                 except TaskStopped:
                     self.paper_updated.emit(index, deepcopy(paper))
                     raise
