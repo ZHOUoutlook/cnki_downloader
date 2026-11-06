@@ -3,28 +3,28 @@
 """CNKI 论文助手 - GUI 入口
 
 使用方法:
-    python gui_app.py
+    cnki-gui
+    python -m cnki_downloader.gui_app
 """
 
 import sys
 
-try:
-    from PyQt6.QtWidgets import QApplication
-except ImportError:
-    print("GUI 需要 PyQt6，请执行：pip install cnki-downloader[gui]")
-    sys.exit(1)
-
-from .gui import MainWindow
-
-
 def main():
     """GUI 主入口"""
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from .gui import MainWindow
+    except ImportError as exc:
+        print(f'GUI 无法启动：{exc}\n请安装或检查 GUI 依赖：pip install "cnki-downloader[gui]"')
+        return 1
     app = QApplication(sys.argv)
-    app.setFont(app.font())
+    app.setStyle('Fusion')
+    app.setOrganizationName('CNKIDownloader')
+    app.setApplicationName('CNKI 论文助手')
     win = MainWindow()
     win.show()
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

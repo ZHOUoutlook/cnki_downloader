@@ -1,745 +1,777 @@
-"""主窗口 - CNKI 论文助手 GUI"""
-
+"""文献工作台：文件、结果视图与后台任务的协调。"""
+from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, Qt
-from PyQt6.QtGui import QAction, QKeySequence
-from PyQt6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QFrame, QGroupBox, QGridLayout,
-    QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar,
-    QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
-    QStackedWidget, QStatusBar, QTableView, QTextEdit, QVBoxLayout, QWidget,
-    QFileDialog, QMessageBox,
-)
+from PyQt6.QtCore import Qt, QSettings, QTimer
+from PyQt6.QtGui import QAction, QKeySequence, QTextCursor
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
+                            QFrame, QLabel, QPushButton, QLineEdit, QComboBox, QGroupBox,
+                            QScrollArea, QSplitter, QPlainTextEdit, QProgressBar,
+                            QFileDialog, QMessageBox, QDialog, QStackedWidget, QButtonGroup, QSizePolicy)
 
-from ..config import OUTPUT_DIR
-from ..utils.file_utils import save_json, sanitize_filename
+from .. import __version__
+from ..utils import sanitize_filename
+from .search_panel import SearchPanel
+from .download_panel import DownloadPanel
+from .detail_dialog import DetailDialog
+from .settings_dialog import SettingsDialog
+from .result_table import ResultTable
+from .result_model import PaperTableModel
+from .workspace import Workspace
+from .workers import AuthCheckWorker, SearchWorker, PaperTaskWorker
 from .styles import get_stylesheet
-from .workers import AuthCheckWorker, SearchWorker
+from .icons import icon
 
 
 class MainWindow(QMainWindow):
-    """主窗口"""
-
-    def __init__(self):
+    def __init__(self, settings=None):
         super().__init__()
-        self.setWindowTitle("CNKI 论文助手")
-        self.resize(1280, 820)
-        self.setMinimumSize(1024, 680)
-        self.setStyleSheet(get_stylesheet())
-        self.auth = None
-        self.session = None
-        self._auth_thread = None
-        self._auth_worker = None
-        self._search_thread = None
-        self._search_worker = None
-        self.all_papers = []
+        self.settings = settings if settings is not None else QSettings('CNKIDownloader', 'Desktop')
+        self.workspace = Workspace()
         self.filtered_papers = []
+        self.job = None
+        self.task_indices = []
         self.current_page = 1
-        self.result_page_size = 20
-
+        self.dirty = False
+        self._save_failed = False
+        self._close_when_idle = False
+        self._paused = False
+        self.result_page_size = int(self.settings.value('result_page_size', 20))
+        self.font_size = int(self.settings.value('font_size', 10))
+        self.setWindowTitle('CNKI 论文助手 · 文献工作台')
+        self.resize(1440, 900)
+        self.setMinimumSize(1100, 760)
         self._init_ui()
         self._init_menu()
-        self._init_statusbar()
-        self._connect_signals()
-        self._refresh_result_page()
-        self.refresh_network_status()
+        self._restore_settings()
+        self._apply_style()
+        self._refresh_results()
+        self._set_busy(False)
 
-    # ── UI 初始化 ──────────────────────────────────────────────
+    @property
+    def all_papers(self):
+        return self.workspace.papers
 
     def _init_ui(self):
-        central = QWidget()
-        central.setObjectName("appRoot")
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(16, 14, 16, 12)
-        main_layout.setSpacing(12)
-
-        main_layout.addWidget(self._create_header())
-
-        workspace = QSplitter(Qt.Orientation.Horizontal)
-        workspace.setObjectName("workspaceSplitter")
-        workspace.addWidget(self._create_sidebar())
-        workspace.addWidget(self._create_result_area())
-        workspace.setStretchFactor(0, 0)
-        workspace.setStretchFactor(1, 1)
-        workspace.setCollapsible(0, False)
-        workspace.setCollapsible(1, False)
-        workspace.setSizes([360, 900])
-
-        vertical_splitter = QSplitter(Qt.Orientation.Vertical)
-        vertical_splitter.addWidget(workspace)
-        vertical_splitter.addWidget(self._create_bottom_panel())
-        vertical_splitter.setStretchFactor(0, 5)
-        vertical_splitter.setStretchFactor(1, 1)
-        vertical_splitter.setSizes([640, 160])
-
-        main_layout.addWidget(vertical_splitter, 1)
-
-    def _create_header(self) -> QWidget:
+        root = QWidget()
+        root.setObjectName('appRoot')
+        self.setCentralWidget(root)
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         header = QFrame()
-        header.setObjectName("topBar")
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(12)
+        header.setObjectName('appHeader')
+        header.setFixedHeight(72)
+        bar = QHBoxLayout(header)
+        bar.setContentsMargins(24, 0, 24, 0)
+        bar.setSpacing(12)
+        mark = QLabel()
+        mark.setPixmap(icon('book', '#FFFFFF', 22).pixmap(22))
+        mark.setFixedSize(40, 40)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setStyleSheet('background: #5B5FEF; border-radius: 10px;')
+        bar.addWidget(mark)
+        brand = QLabel('CNKI 论文助手')
+        brand.setObjectName('brandTitle')
+        bar.addWidget(brand)
+        caption = QLabel('  /  研究工作台')
+        caption.setObjectName('headerCaption')
+        bar.addWidget(caption)
+        bar.addStretch()
+        self.network_label = QLabel('匿名模式')
+        self.network_label.setObjectName('mutedLabel')
+        connection = QLabel()
+        connection.setPixmap(icon('wifi', '#8A93A6', 16).pixmap(16))
+        bar.addWidget(connection)
+        bar.addWidget(self.network_label)
+        self.network_btn = QPushButton('检查连接')
+        self.network_btn.setObjectName('ghostButton')
+        self.network_btn.clicked.connect(self.check_network)
+        bar.addWidget(self.network_btn)
+        self.settings_btn = QPushButton('设置')
+        self.settings_btn.setIcon(icon('settings'))
+        self.settings_btn.setObjectName('ghostButton')
+        self.settings_btn.clicked.connect(self.show_settings)
+        bar.addWidget(self.settings_btn)
+        layout.addWidget(header)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self._create_sidebar())
+        workspace = QWidget()
+        workspace.setObjectName('workspace')
+        content = QVBoxLayout(workspace)
+        content.setContentsMargins(28, 24, 28, 20)
+        content.setSpacing(16)
+        content.addWidget(self._create_results(), 1)
+        content.addWidget(self._create_task_panel())
+        body.addWidget(workspace, 1)
+        layout.addLayout(body, 1)
+        self.statusBar().hide()
 
-        title_box = QVBoxLayout()
-        title_box.setSpacing(2)
-        title = QLabel("CNKI 论文助手")
-        title.setObjectName("appTitle")
-        subtitle = QLabel("检索、筛选、批量下载与任务跟踪")
-        subtitle.setObjectName("appSubtitle")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        layout.addLayout(title_box)
-        self.network_status_label = QLabel("正在检测网络...")
-        self.network_status_label.setObjectName("networkStatusLabel")
-        self.network_status_label.setProperty("status", "checking")
-        layout.addWidget(self.network_status_label)
+    def _create_sidebar(self):
+        sidebar = QFrame()
+        sidebar.setObjectName('sidebar')
+        sidebar.setFixedWidth(280)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(20, 20, 20, 20)
+        side.setSpacing(6)
+        label = QLabel('工作流程')
+        label.setObjectName('eyebrow')
+        side.addWidget(label)
+        side.addSpacing(6)
+        self.flow_buttons = []
+        self.flow_group = QButtonGroup(self)
+        self.flow_group.setExclusive(True)
+        for index, (text, glyph) in enumerate([('检索文献', 'search'), ('补全文献信息', 'layers'), ('下载文件', 'download')]):
+            button = QPushButton(text)
+            button.setObjectName('navButton')
+            button.setIcon(icon(glyph, '#858D9F'))
+            button.setCheckable(True)
+            self.flow_group.addButton(button, index)
+            side.addWidget(button)
+            self.flow_buttons.append(button)
+        self.flow_buttons[0].setChecked(True)
+        side.addSpacing(12)
+        separator = QFrame()
+        separator.setObjectName('separator')
+        separator.setFixedHeight(1)
+        side.addWidget(separator)
+        side.addSpacing(12)
+        self.flow_stack = QStackedWidget()
+        self.search_panel = SearchPanel()
+        self.search_panel.search_btn.setIcon(icon('search', '#FFFFFF', 18))
+        self.search_panel.search_btn.clicked.connect(self.start_search)
+        self.search_panel.keyword.returnPressed.connect(self.start_search)
+        self.flow_stack.addWidget(self.search_panel)
+        self.process_group = QWidget()
+        self.process_group.setObjectName('flowPanel')
+        form = QVBoxLayout(self.process_group)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(16)
+        title = QLabel('整理文献信息')
+        title.setObjectName('panelTitle')
+        form.addWidget(title)
+        hint = QLabel('先补齐文献详情，再获取作者编码。')
+        hint.setObjectName('mutedLabel')
+        hint.setWordWrap(True)
+        form.addWidget(hint)
+        form.addSpacing(8)
+        self.detail_btn = QPushButton('补全详情与作者链接')
+        self.detail_btn.setIcon(icon('file'))
+        self.detail_btn.clicked.connect(lambda: self.start_paper_task('detail'))
+        form.addWidget(self.detail_btn)
+        detail_hint = QLabel('更新摘要、关键词、卷期等信息；缺少作者编码时刷新主页链接。')
+        detail_hint.setObjectName('mutedLabel')
+        detail_hint.setWordWrap(True)
+        form.addWidget(detail_hint)
+        form.addSpacing(12)
+        self.author_btn = QPushButton('获取作者编码')
+        self.author_btn.setObjectName('primaryButton')
+        self.author_btn.setIcon(icon('layers', '#FFFFFF', 18))
+        self.author_btn.clicked.connect(lambda: self.start_paper_task('author'))
+        form.addWidget(self.author_btn)
+        author_hint = QLabel('使用最新的作者主页链接补齐 au-code，已有编码自动跳过。')
+        author_hint.setObjectName('mutedLabel')
+        author_hint.setWordWrap(True)
+        form.addWidget(author_hint)
+        form.addStretch()
+        footnote = QLabel('处理范围在右侧列表底部选择。')
+        footnote.setObjectName('mutedLabel')
+        form.addWidget(footnote)
+        self.flow_stack.addWidget(self.process_group)
+        self.download_panel = DownloadPanel()
+        self.download_panel.download_btn.setIcon(icon('download', '#FFFFFF', 18))
+        self.download_panel.browse_btn.setIcon(icon('folder', size=16))
+        self.download_panel.browse_btn.setText('')
+        self.download_panel.download_btn.clicked.connect(lambda: self.start_paper_task('download'))
+        self.flow_stack.addWidget(self.download_panel)
+        side.addWidget(self.flow_stack, 1)
+        side.addSpacing(16)
+        note = QLabel('检索与信息补全无需校园网')
+        note.setObjectName('mutedLabel')
+        side.addWidget(note)
+        self.flow_group.idClicked.connect(self._select_workflow)
+        return sidebar
 
-        self.refresh_network_btn = QPushButton("刷新状态")
-        self.refresh_network_btn.setObjectName("ghostButton")
-        self.refresh_network_btn.clicked.connect(self.refresh_network_status)
-        layout.addWidget(self.refresh_network_btn)
+    def _select_workflow(self, index):
+        self.flow_stack.setCurrentIndex(index)
+        for i, button in enumerate(self.flow_buttons):
+            button.setChecked(i == index)
+            button.setIcon(icon(['search', 'layers', 'download'][i], '#5B5FEF' if i == index else '#858D9F'))
 
-        layout.addStretch()
-
-        self.header_settings_btn = QPushButton("设置")
-        self.header_settings_btn.setObjectName("ghostButton")
-        layout.addWidget(self.header_settings_btn)
-        return header
-
-    # ── 侧边栏 ───────────────────────────────────────────────
-
-    def _create_sidebar(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setObjectName("sideScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMinimumWidth(340)
-        scroll.setMaximumWidth(420)
-        scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-
-        sidebar = QWidget()
-        sidebar.setObjectName("sidePanel")
-        sidebar.setMinimumWidth(320)
-        layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 0, 12, 12)
-        layout.setSpacing(12)
-
-        layout.addWidget(self._create_action_panel())
-        layout.addStretch()
-        scroll.setWidget(sidebar)
-        return scroll
-
-    def _create_action_panel(self) -> QWidget:
-        panel = QGroupBox("操作面板")
-        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 22, 12, 12)
-        layout.setSpacing(12)
-
-        switcher = QFrame()
-        switcher.setObjectName("panelSwitcher")
-        switcher_layout = QHBoxLayout(switcher)
-        switcher_layout.setContentsMargins(4, 4, 4, 4)
-        switcher_layout.setSpacing(4)
-
-        self.search_panel_btn = QPushButton("搜索")
-        self.search_panel_btn.setObjectName("switchButton")
-        self.search_panel_btn.setCheckable(True)
-        self.search_panel_btn.setChecked(True)
-        self.download_panel_btn = QPushButton("下载")
-        self.download_panel_btn.setObjectName("switchButton")
-        self.download_panel_btn.setCheckable(True)
-
-        self.panel_button_group = QButtonGroup(self)
-        self.panel_button_group.setExclusive(True)
-        self.panel_button_group.addButton(self.search_panel_btn, 0)
-        self.panel_button_group.addButton(self.download_panel_btn, 1)
-
-        switcher_layout.addWidget(self.search_panel_btn)
-        switcher_layout.addWidget(self.download_panel_btn)
-        layout.addWidget(switcher)
-
-        self.action_stack = QStackedWidget()
-        self.action_stack.addWidget(self._create_search_panel())
-        self.action_stack.addWidget(self._create_download_panel())
-        self.panel_button_group.idClicked.connect(self.action_stack.setCurrentIndex)
-        layout.addWidget(self.action_stack)
-        return panel
-
-    def _create_search_panel(self) -> QWidget:
-        panel = QWidget()
-        search_layout = QGridLayout(panel)
-        search_layout.setContentsMargins(0, 0, 0, 0)
-        search_layout.setHorizontalSpacing(10)
-        search_layout.setVerticalSpacing(10)
-        search_layout.setColumnMinimumWidth(0, 64)
-        search_layout.setColumnStretch(0, 0)
-        search_layout.setColumnStretch(1, 1)
-
-        self.journal_radio = QRadioButton("期刊名")
-        self.journal_radio.setChecked(True)
-        self.title_radio = QRadioButton("论文标题")
-
-        radio_layout = QHBoxLayout()
-        radio_layout.addWidget(self.journal_radio)
-        radio_layout.addWidget(self.title_radio)
-        radio_layout.addStretch()
-        search_layout.addLayout(radio_layout, 0, 0, 1, 2)
-
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("输入期刊名称或论文标题")
-        self.search_input.setMinimumWidth(180)
-        search_layout.addWidget(self.search_input, 1, 0, 1, 2)
-
-        self.page_size_combo = QComboBox()
-        self.page_size_combo.addItems(["20", "50", "100"])
-        search_layout.addWidget(QLabel("每页"), 2, 0)
-        search_layout.addWidget(self.page_size_combo, 2, 1)
-
-        self.start_page_spin = QSpinBox()
-        self.start_page_spin.setRange(1, 999)
-        self.start_page_spin.setValue(1)
-        search_layout.addWidget(QLabel("起始页"), 3, 0)
-        search_layout.addWidget(self.start_page_spin, 3, 1)
-
-        self.page_count_spin = QSpinBox()
-        self.page_count_spin.setRange(1, 50)
-        self.page_count_spin.setValue(1)
-        search_layout.addWidget(QLabel("页数"), 4, 0)
-        search_layout.addWidget(self.page_count_spin, 4, 1)
-
-        self.search_btn = QPushButton("搜索")
-        self.search_btn.setObjectName("primaryButton")
-        self.clear_btn = QPushButton("清空")
-        self.clear_btn.setObjectName("secondaryButton")
-        self.export_btn = QPushButton("导出 JSON")
-        self.export_btn.setObjectName("secondaryButton")
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
-        btn_layout.addWidget(self.search_btn)
-        btn_layout.addWidget(self.clear_btn)
-        search_layout.addLayout(btn_layout, 5, 0, 1, 2)
-        search_layout.addWidget(self.export_btn, 6, 0, 1, 2)
-
-        return panel
-
-    def _create_download_panel(self) -> QWidget:
-        panel = QWidget()
-        dl_layout = QGridLayout(panel)
-        dl_layout.setContentsMargins(0, 0, 0, 0)
-        dl_layout.setHorizontalSpacing(10)
-        dl_layout.setVerticalSpacing(10)
-        dl_layout.setColumnMinimumWidth(0, 64)
-        dl_layout.setColumnMinimumWidth(2, 54)
-        dl_layout.setColumnStretch(0, 0)
-        dl_layout.setColumnStretch(1, 1)
-        dl_layout.setColumnStretch(2, 0)
-
-        dl_layout.addWidget(QLabel("保存到"), 0, 0)
-        self.output_dir_input = QLineEdit()
-        self.output_dir_input.setText(OUTPUT_DIR)
-        self.output_dir_input.setMinimumWidth(150)
-        self.browse_btn = QPushButton("浏览")
-        self.browse_btn.setObjectName("secondaryButton")
-        self.browse_btn.setFixedWidth(58)
-        dl_layout.addWidget(self.output_dir_input, 0, 1)
-        dl_layout.addWidget(self.browse_btn, 0, 2)
-
-        dl_layout.addWidget(QLabel("请求间隔"), 1, 0)
-        self.delay_spin = QSpinBox()
-        self.delay_spin.setRange(0, 120)
-        self.delay_spin.setSingleStep(1)
-        self.delay_spin.setValue(10)
-        self.delay_spin.setSuffix(" 秒")
-        dl_layout.addWidget(self.delay_spin, 1, 1, 1, 2)
-
-        dl_layout.addWidget(QLabel("重试次数"), 2, 0)
-        self.retry_spin = QSpinBox()
-        self.retry_spin.setRange(0, 10)
-        self.retry_spin.setValue(3)
-        dl_layout.addWidget(self.retry_spin, 2, 1, 1, 2)
-
-        dl_layout.addWidget(QLabel("JSON"), 3, 0)
-        self.json_input = QLineEdit()
-        self.json_input.setPlaceholderText("选择论文 JSON 文件")
-        self.json_input.setMinimumWidth(150)
-        self.json_browse_btn = QPushButton("选择")
-        self.json_browse_btn.setObjectName("secondaryButton")
-        self.json_browse_btn.setFixedWidth(58)
-        dl_layout.addWidget(self.json_input, 3, 1)
-        dl_layout.addWidget(self.json_browse_btn, 3, 2)
-
-        self.import_btn = QPushButton("导入 JSON")
-        self.import_btn.setObjectName("secondaryButton")
-        self.start_dl_btn = QPushButton("开始下载")
-        self.start_dl_btn.setObjectName("primaryButton")
-        self.stop_dl_btn = QPushButton("停止")
-        self.stop_dl_btn.setObjectName("dangerButton")
-        self.stop_dl_btn.setEnabled(False)
-        dl_layout.addWidget(self.import_btn, 4, 0, 1, 3)
-        dl_layout.addWidget(self.start_dl_btn, 5, 0, 1, 2)
-        dl_layout.addWidget(self.stop_dl_btn, 5, 2)
-
-        self.dl_progress = QProgressBar()
-        self.dl_progress.setValue(0)
-        dl_layout.addWidget(self.dl_progress, 6, 0, 1, 3)
-
-        self.dl_status_label = QLabel("就绪")
-        self.dl_status_label.setObjectName("mutedLabel")
-        dl_layout.addWidget(self.dl_status_label, 7, 0, 1, 3)
-
-        return panel
-
-    # ── 结果区 ───────────────────────────────────────────────
-
-    def _create_result_area(self) -> QWidget:
+    def _create_results(self):
         area = QWidget()
-        area.setObjectName("contentPanel")
+        area.setObjectName('workspace')
         layout = QVBoxLayout(area)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        toolbar = QFrame()
-        toolbar.setObjectName("resultToolbar")
-        toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(14, 10, 14, 10)
-        toolbar_layout.setSpacing(10)
-
-        self.search_count_label = QLabel("搜索结果：0 篇")
-        self.search_count_label.setObjectName("sectionTitle")
-        toolbar_layout.addWidget(self.search_count_label)
-        toolbar_layout.addStretch()
-
+        layout.setSpacing(16)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title = QLabel('文献库')
+        title.setObjectName('pageTitle')
+        title_row.addWidget(title)
+        self.count_label = QLabel('0 篇')
+        self.count_label.setObjectName('countBadge')
+        title_row.addWidget(self.count_label)
+        title_row.addStretch()
+        self.open_btn = QPushButton('导入文献')
+        self.open_btn.setIcon(icon('folder', size=18))
+        self.open_btn.clicked.connect(self.open_json)
+        self.save_btn = QPushButton('保存文献库')
+        self.save_btn.setObjectName('secondaryButton')
+        self.save_btn.setIcon(icon('save', size=18))
+        self.save_btn.clicked.connect(self.save_workspace)
+        title_row.addWidget(self.open_btn)
+        title_row.addWidget(self.save_btn)
+        layout.addLayout(title_row)
+        self.file_label = QLabel('未打开文件 · 开始检索，或导入已有文献')
+        self.file_label.setObjectName('fileBreadcrumb')
+        self.file_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.file_label)
+        card = QFrame()
+        card.setObjectName('contentPanel')
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 8, 16, 12)
+        card_layout.setSpacing(0)
+        tabs = QHBoxLayout()
+        tabs.setSpacing(20)
+        self.view_group = QButtonGroup(self)
+        self.view_group.setExclusive(True)
+        self.view_buttons = []
+        for i, text in enumerate(['全部文献', '编码待补全', '已下载']):
+            button = QPushButton(text)
+            button.setObjectName('viewTab')
+            button.setCheckable(True)
+            self.view_group.addButton(button, i)
+            self.view_buttons.append(button)
+            tabs.addWidget(button)
+        self.view_buttons[0].setChecked(True)
+        self.view_group.idClicked.connect(lambda i: self.status_filter.setCurrentIndex([0, 4, 2][i]))
+        tabs.addStretch()
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(['默认排序', '最新发表', '被引最多', '按标题排序'])
+        self.sort_combo.setAccessibleName('排序方式')
+        self.sort_combo.setMaximumWidth(140)
+        self.sort_combo.currentIndexChanged.connect(self._on_sort_choice)
+        tabs.addWidget(self.sort_combo)
+        card_layout.addLayout(tabs)
+        card_layout.addSpacing(12)
+        filters = QHBoxLayout()
+        filters.setSpacing(10)
         self.filter_input = QLineEdit()
-        self.filter_input.setPlaceholderText("筛选标题、作者、来源")
-        toolbar_layout.addWidget(self.filter_input)
-
-        self.download_selected_btn = QPushButton("下载选中")
-        self.download_selected_btn.setObjectName("secondaryButton")
-        toolbar_layout.addWidget(self.download_selected_btn)
-
-        layout.addWidget(toolbar)
-        layout.addWidget(self._create_result_table(), 1)
+        self.filter_input.setObjectName('libraryFilter')
+        self.filter_input.setPlaceholderText('搜索文献标题、作者或来源')
+        self.filter_input.setAccessibleName('筛选文献')
+        self.filter_input.setClearButtonEnabled(True)
+        self.filter_input.addAction(icon('search', '#A1A8B8', 18), QLineEdit.ActionPosition.LeadingPosition)
+        self.filter_input.textChanged.connect(self.apply_result_filter)
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(['全部状态', '待下载', '已下载', '下载失败', '编码待补全'])
+        self.status_filter.currentIndexChanged.connect(self.apply_result_filter)
+        self.status_filter.setMaximumWidth(134)
+        filters.addWidget(self.filter_input, 1)
+        filters.addWidget(self.status_filter)
+        card_layout.addLayout(filters)
+        card_layout.addSpacing(12)
+        self.scope = QComboBox()
+        self.scope.addItems(['当前筛选结果（全部页）', '仅选中的文献'])
+        self.scope.setFixedWidth(205)
+        self.scope.setAccessibleName('操作范围')
+        self.scope.setToolTip('补全详情、作者编码和下载任务的处理范围')
+        self.selection_label = QLabel('已选 0 篇')
+        self.selection_label.setObjectName('mutedLabel')
+        self.select_all_btn = QPushButton('选择本页')
+        self.select_all_btn.setObjectName('ghostButton')
+        self.empty_state = QWidget()
+        empty = QVBoxLayout(self.empty_state)
+        empty.setSpacing(16)
+        empty.addStretch()
+        empty_icon = QLabel()
+        empty_icon.setPixmap(icon('book', '#C5CAE1', 54).pixmap(54))
+        empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.addWidget(empty_icon)
+        self.empty_label = QLabel('还没有文献')
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setObjectName('panelTitle')
+        empty.addWidget(self.empty_label)
+        self.empty_hint = QLabel('在左侧开始检索，或导入已有的 JSON 文件')
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_hint.setObjectName('mutedLabel')
+        empty.addWidget(self.empty_hint)
+        empty.addStretch()
+        card_layout.addWidget(self.empty_state, 1)
+        self.table_model = PaperTableModel(self)
+        self.table_view = ResultTable()
+        self.table_view.setModel(self.table_model)
+        self.table_view.configure_columns()
+        self.table_view.details_requested.connect(self.show_details)
+        self.table_view.horizontalHeader().sortIndicatorChanged.connect(self.apply_result_filter)
+        self.table_view.selectionModel().selectionChanged.connect(self._selection_changed)
+        self.select_all_btn.clicked.connect(self.table_view.selectAll)
+        card_layout.addWidget(self.table_view, 1)
+        card_layout.addSpacing(8)
+        pager = QHBoxLayout()
+        self.table_view.setToolTip('双击文献或按 Enter 查看完整详情')
+        pager.addWidget(self.scope)
+        pager.addWidget(self.selection_label)
+        pager.addWidget(self.select_all_btn)
+        pager.addStretch()
+        self.prev_btn = QPushButton('上一页')
+        self.next_btn = QPushButton('下一页')
+        self.prev_btn.setObjectName('ghostButton')
+        self.next_btn.setObjectName('ghostButton')
+        self.prev_btn.clicked.connect(lambda: self.change_page(-1))
+        self.next_btn.clicked.connect(lambda: self.change_page(1))
+        self.page_label = QLabel('0 / 0')
+        self.page_label.setObjectName('mutedLabel')
+        pager.addWidget(self.prev_btn)
+        pager.addWidget(self.page_label)
+        pager.addWidget(self.next_btn)
+        card_layout.addLayout(pager)
+        layout.addWidget(card, 1)
         return area
 
-    def _create_result_table(self) -> QWidget:
-        """创建结果表格组件"""
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+    def _on_sort_choice(self, index):
+        column, order = [(0, Qt.SortOrder.AscendingOrder), (4, Qt.SortOrder.DescendingOrder),
+                         (5, Qt.SortOrder.DescendingOrder), (1, Qt.SortOrder.AscendingOrder)][index]
+        self.table_view.sortByColumn(column, order)
 
-        # 表格
-        self.table_view = QTableView()
-        self.table_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.table_view.setAlternatingRowColors(True)
-        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_view.setSortingEnabled(True)
-        header = self.table_view.horizontalHeader()
-        header.setMinimumSectionSize(56)
-        header.setStretchLastSection(False)
-        self.table_view.verticalHeader().setVisible(False)
-        self.table_view.verticalHeader().setDefaultSectionSize(34)
-
-        # 表头
-        self.table_columns = ["序号", "标题", "作者", "来源", "时间", "被引", "下载"]
-        from .result_model import PaperTableModel
-        self.table_model = PaperTableModel(self.table_view, self.table_columns)
-        self.table_view.setModel(self.table_model)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        self.table_view.setColumnWidth(0, 64)
-        self.table_view.setColumnWidth(4, 112)
-        self.table_view.setColumnWidth(5, 72)
-        self.table_view.setColumnWidth(6, 72)
-
-        layout.addWidget(self.table_view)
-
-        # 分页控件
-        pager_layout = QHBoxLayout()
-        pager_layout.setContentsMargins(12, 0, 12, 8)
-        self.prev_btn = QPushButton("上一页")
-        self.prev_btn.setObjectName("secondaryButton")
-        self.prev_btn.setEnabled(False)
-        self.next_btn = QPushButton("下一页")
-        self.next_btn.setObjectName("secondaryButton")
-        self.next_btn.setEnabled(False)
-        self.page_label = QLabel("第 0 页 / 共 0 页")
-        self.page_label.setObjectName("mutedLabel")
-
-        pager_layout.addStretch()
-        pager_layout.addWidget(self.prev_btn)
-        pager_layout.addWidget(self.page_label)
-        pager_layout.addWidget(self.next_btn)
-
-        layout.addLayout(pager_layout)
-        return container
-
-    # ── 底部面板 ───────────────────────────────────────────────
-
-    def _create_bottom_panel(self) -> QWidget:
+    def _create_task_panel(self):
         panel = QFrame()
-        panel.setObjectName("bottomPanel")
+        panel.setObjectName('taskPanel')
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(8)
-
-        stats_layout = QHBoxLayout()
-        self.dl_stats_label = QLabel("已下载：0/0 | 成功：0 | 失败：0")
-        self.dl_stats_label.setObjectName("mutedLabel")
-        stats_layout.addWidget(self.dl_stats_label)
-        stats_layout.addStretch()
-        self.runtime_label = QLabel("任务日志")
-        self.runtime_label.setObjectName("mutedLabel")
-        stats_layout.addWidget(self.runtime_label)
-        layout.addLayout(stats_layout)
-
-        self.log_text = QTextEdit()
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
+        row = QHBoxLayout()
+        glyph = QLabel()
+        glyph.setPixmap(icon('clock', '#969EB1', 18).pixmap(18))
+        row.addWidget(glyph)
+        self.task_label = QLabel('就绪')
+        self.task_label.setObjectName('sectionTitle')
+        self.task_label.setMinimumWidth(0)
+        self.task_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        row.addWidget(self.task_label, 1)
+        self.stats_label = QLabel('后台执行 · 自动保存')
+        self.stats_label.setObjectName('mutedLabel')
+        row.addWidget(self.stats_label)
+        self.log_toggle = QPushButton('查看日志')
+        self.log_toggle.setObjectName('ghostButton')
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.toggled.connect(self._set_log_visible)
+        row.addWidget(self.log_toggle)
+        self.pause_btn = QPushButton('暂停')
+        self.pause_btn.setIcon(icon('pause', size=14))
+        self.pause_btn.setObjectName('ghostButton')
+        self.stop_btn = QPushButton('停止')
+        self.stop_btn.setObjectName('dangerButton')
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.stop_btn.clicked.connect(self.stop_task)
+        row.addWidget(self.pause_btn)
+        row.addWidget(self.stop_btn)
+        layout.addLayout(row)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setPlaceholderText("搜索、下载和错误信息会显示在这里")
+        self.log_text.setMaximumBlockCount(2000)
+        self.log_text.setFixedHeight(130)
+        self.log_text.setPlaceholderText('任务进度和处理记录会显示在这里。')
+        self.log_text.hide()
         layout.addWidget(self.log_text)
-
         return panel
 
-    # ── 菜单 ───────────────────────────────────────────────────
+    def _set_log_visible(self, visible):
+        self.log_text.setVisible(visible)
+        self.log_toggle.setChecked(visible)
+        self.log_toggle.setText('收起日志' if visible else '查看日志')
 
     def _init_menu(self):
-        menubar = self.menuBar()
+        files = self.menuBar().addMenu('文件')
+        self.open_action = self._action(files, '打开 JSON…', self.open_json, QKeySequence.StandardKey.Open)
+        self.save_action = self._action(files, '保存', self.save_workspace, QKeySequence.StandardKey.Save)
+        self.save_as_action = self._action(files, '另存全部文献…', self.save_as, QKeySequence.StandardKey.SaveAs)
+        self.recent_menu = files.addMenu('最近文件')
+        self._update_recent_menu()
+        files.addSeparator()
+        self._action(files, '退出', self.close, QKeySequence.StandardKey.Quit)
+        tools = self.menuBar().addMenu('工具')
+        self._action(tools, '设置…', self.show_settings)
+        self._action(tools, '清空日志', self.log_text.clear)
+        help_menu = self.menuBar().addMenu('帮助')
+        self._action(help_menu, '关于', lambda: QMessageBox.information(
+            self, '关于', f'CNKI 论文助手 v{__version__}\n搜索、详情和作者编码：匿名会话\nPDF / CAJ 下载：知网授权 IP'))
 
-        # 文件菜单
-        file_menu = menubar.addMenu("&文件")
+    def _action(self, menu, title, callback, shortcut=None):
+        action = QAction(title, self)
+        if shortcut:
+            action.setShortcut(shortcut)
+        action.triggered.connect(callback)
+        menu.addAction(action)
+        return action
 
-        exit_action = QAction("退&出", self)
-        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+    def append_log(self, message):
+        self.log_text.appendPlainText(f'{datetime.now():%H:%M:%S}  {message}')
+        self.log_text.moveCursor(QTextCursor.MoveOperation.End)
 
-        # 工具菜单
-        tools_menu = menubar.addMenu("&工具")
+    def _update_recent_menu(self):
+        self.recent_menu.clear()
+        paths = self.settings.value('recent_files', [], type=list)
+        for path in paths[:10]:
+            action = self.recent_menu.addAction(str(path))
+            action.triggered.connect(lambda checked=False, p=path: self.open_json(p))
+        self.recent_menu.setEnabled(bool(paths) and self.job is None)
 
-        settings_action = QAction("&设置", self)
-        settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
-        tools_menu.addAction(settings_action)
+    def _remember_file(self):
+        path = str(self.workspace.path)
+        paths = self.settings.value('recent_files', [], type=list)
+        self.settings.setValue('recent_files', [path] + [p for p in paths if p != path][:9])
+        self._update_recent_menu()
+        self.file_label.setText(self.workspace.path.name)
+        self.file_label.setToolTip(path)
 
-        # 帮助菜单
-        help_menu = menubar.addMenu("&帮助")
-
-        about_action = QAction("&关于", self)
-        about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
-
-    # ── 状态栏 ─────────────────────────────────────────────────
-
-    def _init_statusbar(self):
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-
-        self.status_label = QLabel("就绪")
-        self.status_bar.addWidget(self.status_label)
-
-        self.status_spacer = QLabel()
-        self.status_spacer.setMinimumWidth(200)
-        self.status_bar.addPermanentWidget(self.status_spacer)
-
-        self.version_label = QLabel("v1.0.0")
-        self.status_bar.addPermanentWidget(self.version_label)
-
-    def _connect_signals(self):
-        """连接搜索相关交互。"""
-        self.search_btn.clicked.connect(self.start_search)
-        self.search_input.returnPressed.connect(self.start_search)
-        self.clear_btn.clicked.connect(self.clear_search_results)
-        self.export_btn.clicked.connect(self.export_search_results)
-        self.filter_input.textChanged.connect(self.apply_result_filter)
-        self.prev_btn.clicked.connect(self.show_prev_page)
-        self.next_btn.clicked.connect(self.show_next_page)
-
-    # ── 辅助方法 ───────────────────────────────────────────────
-
-    def _show_about(self):
-        from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self,
-            "关于 CNKI 论文助手",
-            "CNKI 论文助手 v1.0.0\n\n"
-            "一款知网论文搜索和下载的桌面应用。\n\n"
-            "基于 PyQt6 构建。"
-        )
-
-    def closeEvent(self, event):
-        """关闭窗口时清理后台认证线程。"""
-        if self._auth_thread and self._auth_thread.isRunning():
-            self.append_log("正在检测网络状态，请稍后关闭窗口。")
-            event.ignore()
+    def open_json(self, path=None):
+        if self.job or not self._ensure_saved():
             return
-        if self._search_thread and self._search_thread.isRunning():
-            self.append_log("正在搜索论文，请稍后关闭窗口。")
-            event.ignore()
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, '导入论文 JSON', 'output', 'JSON 文件 (*.json)')
+        if not path:
             return
-        super().closeEvent(event)
-
-    def set_status(self, message: str):
-        """更新状态栏"""
-        self.status_label.setText(message)
-
-    def refresh_network_status(self):
-        """刷新校园网认证状态。"""
-        if self._auth_thread and self._auth_thread.isRunning():
+        try:
+            workspace = Workspace.load(path)
+        except Exception as exc:
+            QMessageBox.warning(self, '导入失败', str(exc))
             return
+        self.workspace = workspace
+        self.dirty = False
+        self.filter_input.clear()
+        self.status_filter.setCurrentIndex(0)
+        self.apply_result_filter()
+        self._remember_file()
+        self.append_log(f'已导入 {len(self.all_papers)} 篇：{workspace.path}')
+        self._set_busy(False)
 
-        self._set_network_status("checking", "正在检测网络...")
-        self.append_log("正在检测校园网连接状态...")
+    def save_workspace(self):
+        if not self.workspace.path:
+            return self.save_as()
+        try:
+            self.workspace.save()
+            self.dirty = False
+            self.file_label.setText(self.workspace.path.name)
+            return True
+        except Exception as exc:
+            self.dirty = True
+            self.append_log(f'保存失败：{exc}。数据仍在界面中，请另存文件。')
+            self.file_label.setText('有未保存进度 · 请另存 JSON')
+            if self.job:
+                self._save_failed = True
+                self.job.cancel()
+            else:
+                QMessageBox.warning(self, '保存失败', str(exc))
+            return False
 
-        self._auth_thread = QThread(self)
-        self._auth_worker = AuthCheckWorker()
-        self._auth_worker.moveToThread(self._auth_thread)
-        self._auth_thread.started.connect(self._auth_worker.run)
-        self._auth_worker.succeeded.connect(self._on_auth_succeeded)
-        self._auth_worker.anonymous_succeeded.connect(self._on_anonymous_auth_succeeded)
-        self._auth_worker.failed.connect(self._on_auth_failed)
-        self._auth_worker.finished.connect(self._auth_thread.quit)
-        self._auth_worker.finished.connect(self._auth_worker.deleteLater)
-        self._auth_thread.finished.connect(self._auth_thread.deleteLater)
-        self._auth_thread.finished.connect(self._clear_auth_worker)
-        self._auth_thread.start()
+    def save_as(self):
+        filename, _ = QFileDialog.getSaveFileName(self, '保存全部文献',
+            str(self.workspace.path or Path('output/文献库.json').resolve()), 'JSON 文件 (*.json)')
+        if not filename:
+            return False
+        try:
+            self.workspace.save(filename)
+            self.dirty = False
+            self._remember_file()
+            self.append_log(f'已保存 {len(self.all_papers)} 篇文献')
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, '保存失败', str(exc))
+            return False
 
-    def _on_auth_succeeded(self, auth, session):
-        """认证成功。"""
-        self.auth = auth
-        self.session = session
-        self._set_network_status("connected", "校园网已连接")
-        self.set_status("校园网已连接")
-        self.append_log("校园网认证成功，可以开始搜索和下载。")
-
-    def _on_anonymous_auth_succeeded(self, auth, session, reason: str):
-        """校园网认证失败后，匿名会话初始化成功。"""
-        self.auth = auth
-        self.session = session
-        self._set_network_status("disconnected", "断开 · 请连接校园网")
-        self.set_status("已启用匿名检索，下载需连接校园网")
-        self.append_log(f"校园网认证失败：{reason}")
-        self.append_log("已启用知网匿名会话，搜索可用，下载需连接校园网。")
-
-    def _on_auth_failed(self, message: str):
-        """认证失败。"""
-        self.auth = None
-        self.session = None
-        self._set_network_status("disconnected", "断开 · 请连接校园网")
-        self.set_status("断开，请连接校园网")
-        self.append_log(f"校园网认证失败：{message}")
-
-    def _clear_auth_worker(self):
-        self._auth_thread = None
-        self._auth_worker = None
+    def _ensure_saved(self):
+        if not self.dirty:
+            return True
+        return bool(self.save_workspace())
 
     def start_search(self):
-        """启动论文搜索。"""
-        keyword = self.search_input.text().strip()
+        if self.job:
+            return
+        sp = self.search_panel
+        keyword = sp.keyword.text().strip()
         if not keyword:
-            QMessageBox.warning(self, "请输入关键词", "请先输入期刊名称或论文标题。")
-            self.search_input.setFocus()
+            sp.keyword.setFocus()
+            self.task_label.setText('请先输入期刊名称或论文标题')
             return
-        if self._search_thread and self._search_thread.isRunning():
+        if not self._ensure_saved():
             return
-
-        search_type = "title" if self.title_radio.isChecked() else "journal"
-        page_count = self.page_count_spin.value()
-        page_size = int(self.page_size_combo.currentText())
-        start_page = self.start_page_spin.value()
-        self.result_page_size = page_size
-        self.current_page = 1
-        self.all_papers = []
-        self.filtered_papers = []
-        self.table_model.clear()
-        self.update_search_count(0)
-        self._update_pager()
-
-        label = "论文标题" if search_type == "title" else "期刊名"
-        self.append_log(f"开始按{label}搜索：{keyword}，页数 {page_count}，每页 {page_size}。")
-        self.set_status("正在搜索...")
-        self._set_searching_state(True)
-
-        self._search_thread = QThread(self)
-        self._search_worker = SearchWorker(search_type, keyword, page_count, page_size, start_page)
-        self._search_worker.moveToThread(self._search_thread)
-        self._search_thread.started.connect(self._search_worker.run)
-        self._search_worker.page_loaded.connect(self._on_search_page_loaded)
-        self._search_worker.succeeded.connect(self._on_search_succeeded)
-        self._search_worker.failed.connect(self._on_search_failed)
-        self._search_worker.finished.connect(self._search_thread.quit)
-        self._search_worker.finished.connect(self._search_worker.deleteLater)
-        self._search_thread.finished.connect(self._search_thread.deleteLater)
-        self._search_thread.finished.connect(self._clear_search_worker)
-        self._search_thread.start()
-
-    def _on_search_page_loaded(self, page: int, count: int, total: int):
-        if count:
-            self.append_log(f"第 {page} 页获取 {count} 篇，累计 {total} 篇。")
-        else:
-            self.append_log(f"第 {page} 页没有更多结果。")
-        self.set_status(f"正在搜索：已获取 {total} 篇")
-
-    def _on_search_succeeded(self, papers: list):
-        self.all_papers = papers
-        self.apply_result_filter()
-        self.set_status("搜索完成")
-        self.append_log(f"搜索完成，共获取 {len(papers)} 篇论文。" if papers else "搜索完成，没有搜索到结果。")
-        self._set_searching_state(False)
-
-    def _on_search_failed(self, message: str):
-        self.set_status("搜索失败")
-        self.append_log(f"搜索失败：{message}")
-        QMessageBox.warning(self, "搜索失败", message)
-        self._set_searching_state(False)
-
-    def _clear_search_worker(self):
-        self._search_thread = None
-        self._search_worker = None
-
-    def _set_searching_state(self, searching: bool):
-        self.search_btn.setEnabled(not searching)
-        self.clear_btn.setEnabled(not searching)
-        self.export_btn.setEnabled(not searching and bool(self.all_papers))
-        self.search_input.setEnabled(not searching)
-        self.journal_radio.setEnabled(not searching)
-        self.title_radio.setEnabled(not searching)
-        self.page_size_combo.setEnabled(not searching)
-        self.page_count_spin.setEnabled(not searching)
-        self.start_page_spin.setEnabled(not searching)
-
-    def _set_network_status(self, status: str, text: str):
-        self.network_status_label.setText(text)
-        self.network_status_label.setProperty("status", status)
-        self.network_status_label.style().unpolish(self.network_status_label)
-        self.network_status_label.style().polish(self.network_status_label)
-
-        is_checking = status == "checking"
-        can_download = status == "connected" and not is_checking
-
-        # 搜索、筛选、导出和 JSON 导入不依赖校园网授权。
-        self.search_btn.setEnabled(not (getattr(self, "_search_thread", None) and self._search_thread.isRunning()))
-        self.export_btn.setEnabled(bool(getattr(self, "all_papers", [])))
-        self.import_btn.setEnabled(True)
-
-        # 只有真正需要校园网授权的下载动作随网络状态启停。
-        self.download_selected_btn.setEnabled(can_download)
-        self.start_dl_btn.setEnabled(can_download)
-        self.refresh_network_btn.setEnabled(not is_checking)
-
-    def append_log(self, message: str):
-        """追加日志"""
-        self.log_text.append(message)
-
-    def apply_result_filter(self):
-        """按标题、作者、来源筛选已加载结果。"""
-        keyword = self.filter_input.text().strip().lower()
-        if not keyword:
-            self.filtered_papers = list(self.all_papers)
-        else:
-            self.filtered_papers = [
-                paper for paper in self.all_papers
-                if keyword in self._paper_filter_text(paper).lower()
-            ]
-        self.current_page = 1
-        self.update_search_count(len(self.filtered_papers))
-        self._refresh_result_page()
-
-    def _paper_filter_text(self, paper) -> str:
-        authors = " ".join(author.name for author in getattr(paper, "authors", []))
-        return " ".join([getattr(paper, "title", ""), authors, getattr(paper, "source", "")])
-
-    def _refresh_result_page(self):
-        """刷新当前页结果。"""
-        total = len(self.filtered_papers)
-        total_pages = self._total_result_pages()
-        if total_pages == 0:
-            self.current_page = 0
-            page_papers = []
-        else:
-            self.current_page = max(1, min(self.current_page, total_pages))
-            start = (self.current_page - 1) * self.result_page_size
-            page_papers = self.filtered_papers[start:start + self.result_page_size]
-        self.table_model.set_papers(page_papers)
-        self._update_pager(total, total_pages)
-
-    def _total_result_pages(self) -> int:
-        if not self.filtered_papers:
-            return 0
-        return (len(self.filtered_papers) + self.result_page_size - 1) // self.result_page_size
-
-    def _update_pager(self, total: int = None, total_pages: int = None):
-        if total is None:
-            total = len(self.filtered_papers)
-        if total_pages is None:
-            total_pages = self._total_result_pages()
-        self.page_label.setText(f"第 {self.current_page} 页 / 共 {total_pages} 页 · {total} 篇")
-        self.prev_btn.setEnabled(total_pages > 0 and self.current_page > 1)
-        self.next_btn.setEnabled(total_pages > 0 and self.current_page < total_pages)
-
-    def show_prev_page(self):
-        if self.current_page > 1:
-            self.current_page -= 1
-            self._refresh_result_page()
-
-    def show_next_page(self):
-        total_pages = self._total_result_pages()
-        if self.current_page < total_pages:
-            self.current_page += 1
-            self._refresh_result_page()
-
-    def clear_search_results(self):
-        """清空搜索输入和结果。"""
-        self.search_input.clear()
-        self.filter_input.clear()
-        self.all_papers = []
-        self.filtered_papers = []
-        self.current_page = 1
-        self.table_model.clear()
-        self.update_search_count(0)
-        self._refresh_result_page()
-        self.export_btn.setEnabled(False)
-        self.set_status("已清空")
-        self.append_log("已清空搜索条件和结果。")
-
-    def export_search_results(self):
-        """导出当前搜索结果为 JSON。"""
-        if not self.all_papers:
-            QMessageBox.information(self, "没有可导出的结果", "当前没有搜索结果可导出。")
-            return
-        default_name = sanitize_filename(self.search_input.text().strip() or "搜索结果") + ".json"
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "导出搜索结果",
-            str(Path(OUTPUT_DIR) / default_name),
-            "JSON 文件 (*.json)",
-        )
+        filename, _ = QFileDialog.getSaveFileName(self, '选择搜索结果文件（已有文件会增量合并）',
+            str(Path('output') / (sanitize_filename(keyword) + '.json')), 'JSON 文件 (*.json)')
         if not filename:
             return
-        saved_path = save_json(self.all_papers, filename)
-        self.append_log(f"搜索结果已导出：{saved_path}")
-        self.set_status("导出完成")
+        try:
+            self.workspace = Workspace.load(filename) if Path(filename).exists() else Workspace(path=filename)
+        except Exception as exc:
+            QMessageBox.warning(self, '无法读取已有文件', str(exc))
+            return
+        self.filter_input.clear()
+        self.status_filter.setCurrentIndex(0)
+        self.apply_result_filter()
+        self._remember_file()
+        worker = SearchWorker(sp.mode.currentData(), keyword, sp.page_count.value(),
+                              int(sp.page_size.currentText()), sp.start_page.value(), self)
+        worker.papers_loaded.connect(self._search_page_loaded)
+        self._start_job(worker, '正在搜索文献')
 
-    def update_search_count(self, count: int):
-        """更新搜索结果计数"""
-        self.search_count_label.setText(f"搜索结果：{count} 篇")
+    def _search_page_loaded(self, papers):
+        added = self.workspace.merge(papers)
+        self.dirty = True
+        self.append_log(f'本页获取 {len(papers)} 篇，新增 {added} 篇')
+        self._autosave()
+        self._refresh_results()
 
-    def update_dl_stats(self, downloaded: int, total: int, success: int, failed: int):
-        """更新下载统计"""
-        self.dl_stats_label.setText(f"已下载：{downloaded}/{total} | 成功：{success} | 失败：{failed}")
+    def target_indices(self):
+        if self.scope.currentIndex() == 1:
+            papers = [self.table_model.paper_at(i.row()) for i in self.table_view.selectionModel().selectedRows()]
+        else:
+            papers = self.filtered_papers
+        lookup = {id(p): i for i, p in enumerate(self.all_papers)}
+        return [lookup[id(p)] for p in papers]
 
-    def update_dl_progress(self, value: int):
-        """更新下载进度条"""
-        self.dl_progress.setValue(value)
+    def start_paper_task(self, operation):
+        if self.job:
+            return
+        indices = self.target_indices()
+        if not indices:
+            self.task_label.setText('请导入文献，或选择需要处理的文献')
+            return
+        dp = self.download_panel
+        if operation == 'download':
+            if not dp.output_dir.text().strip():
+                self.task_label.setText('请先选择下载保存目录')
+                dp.output_dir.setFocus()
+                return
+            if dp.limit_spin.value():
+                indices = indices[:dp.limit_spin.value()]
+        if not self.workspace.path and not self.save_as():
+            return
+        if not self._ensure_saved():
+            return
+        self.task_indices = indices
+        worker = PaperTaskWorker(operation, [self.all_papers[i] for i in indices],
+            output_dir=dp.output_dir.text().strip(),
+            delay=dp.delay_min_spin.value() if operation == 'download' else 0,
+            delay_max=dp.delay_max_spin.value() if operation == 'download' else 0,
+            retries=dp.retries_spin.value(), parent=self)
+        worker.paper_updated.connect(self._paper_updated)
+        label = {'detail': '补全详情 / 刷新作者链接', 'author': '获取作者编码', 'download': '下载文献'}[operation]
+        self._start_job(worker, f'{label} · {len(indices)} 篇')
 
-    def set_dl_status(self, message: str):
-        """更新下载状态"""
-        self.dl_status_label.setText(message)
+    def _paper_updated(self, index, paper):
+        self.workspace.papers[self.task_indices[index]] = paper
+        self.dirty = True
+        self._autosave()
+        self._refresh_results()
+
+    def _autosave(self):
+        if not self._save_failed:
+            self.save_workspace()
+
+    def _start_job(self, worker, label):
+        self.job = worker
+        self._paused = False
+        self._save_failed = False
+        self.pause_btn.setText('暂停')
+        self.pause_btn.setIcon(icon('pause', size=14))
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        self.stats_label.setText('正在建立连接…')
+        self.task_label.setText(label)
+        self.append_log(label)
+        self._store_settings()
+        worker.log.connect(self.append_log)
+        worker.failed.connect(self._task_failed)
+        worker.completed.connect(self._task_completed)
+        worker.progress.connect(self._task_progress)
+        worker.finished.connect(self._job_finished)
+        self._set_busy(True)
+        worker.start()
+
+    def _task_progress(self, done, total, success, failed, skipped):
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        self.stats_label.setText(f'{done}/{total} · 成功 {success} · 失败 {failed} · 跳过 {skipped}')
+        if failed:
+            self._set_log_visible(True)
+
+    def _task_completed(self, message):
+        self.task_label.setText(message)
+        self.append_log(message)
+
+    def _task_failed(self, message):
+        self.task_label.setText('任务失败 · 请查看下方日志')
+        self.append_log(f'任务失败：{message}')
+        self._set_log_visible(True)
+
+    def _job_finished(self):
+        job = self.job
+        self.job = None
+        if job:
+            job.deleteLater()
+        if self.progress.maximum() == 0:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+        if self._save_failed:
+            self.task_label.setText('文件保存失败 · 任务已停止，请另存 JSON')
+            self._set_log_visible(True)
+        self.progress.hide()
+        self._set_busy(False)
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
+
+    def _set_busy(self, busy):
+        for widget in (self.search_panel, self.process_group, self.download_panel, self.open_btn,
+                       self.save_btn, self.network_btn, self.settings_btn, self.scope):
+            widget.setEnabled(not busy)
+        for action in (self.open_action, self.save_action, self.save_as_action):
+            action.setEnabled(not busy)
+        self.recent_menu.setEnabled(not busy and bool(self.settings.value('recent_files', [], type=list)))
+        self.pause_btn.setEnabled(busy)
+        self.stop_btn.setEnabled(busy)
+        has_data = bool(self.all_papers)
+        self.process_group.setEnabled(not busy and has_data)
+        self.download_panel.download_btn.setEnabled(not busy and has_data)
+        self.save_btn.setEnabled(not busy and has_data)
+
+    def toggle_pause(self):
+        if self.job:
+            self._paused = not self._paused
+            self.job.set_paused(self._paused)
+            self.pause_btn.setText('继续' if self._paused else '暂停')
+            self.append_log('已请求暂停，当前文献处理结束后暂停' if self._paused else '任务继续')
+            self.pause_btn.setIcon(icon('play' if self._paused else 'pause', size=14))
+
+    def stop_task(self):
+        if self.job:
+            self.job.cancel()
+            self.pause_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False)
+            self.task_label.setText('正在停止 · 等待当前文献处理结束')
+
+    def check_network(self):
+        if self.job:
+            return
+        worker = AuthCheckWorker(self)
+        worker.succeeded.connect(lambda: self.network_label.setText('匿名连接正常'))
+        worker.succeeded.connect(lambda: self._task_completed('匿名连接正常；下载时单独进行 IP 登录'))
+        worker.failed.connect(lambda message: self.network_label.setText('连接失败 · 可重试'))
+        self._start_job(worker, '正在检查匿名连接')
+
+    def apply_result_filter(self, *args):
+        self.current_page = 1
+        self._refresh_results()
+
+    def _refresh_results(self):
+        keyword = self.filter_input.text().strip().casefold()
+        status = self.status_filter.currentIndex()
+        def matches(p):
+            text = ' '.join([p.title, p.source, ' '.join(a.name for a in p.authors)]).casefold()
+            return (not keyword or keyword in text) and (
+                status == 0 or (status == 1 and p.download_status == 'pending')
+                or (status == 2 and p.download_status == 'completed')
+                or (status == 3 and p.download_status == 'failed')
+                or (status == 4 and (not p.authors or any(not a.au_code for a in p.authors))))
+        header = self.table_view.horizontalHeader()
+        self.filtered_papers = sorted([p for p in self.all_papers if matches(p)],
+            key=lambda p: PaperTableModel.sort_key(p, header.sortIndicatorSection()),
+            reverse=header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
+        count = len(self.filtered_papers)
+        pages = (count + self.result_page_size - 1) // self.result_page_size
+        self.current_page = max(1, min(self.current_page, pages)) if pages else 0
+        start = max(0, self.current_page - 1) * self.result_page_size
+        self.table_model.set_papers(self.filtered_papers[start:start + self.result_page_size])
+        self.count_label.setText(f'{count} / {len(self.all_papers)} 篇' if count != len(self.all_papers) else f'{count} 篇')
+        self.view_group.setExclusive(False)
+        for button, status_index in zip(self.view_buttons, [0, 4, 2]):
+            button.setChecked(status == status_index)
+        self.view_group.setExclusive(True)
+        self.empty_label.setVisible(count == 0)
+        self.empty_state.setVisible(count == 0)
+        self.empty_label.setText('没有符合条件的文献' if self.all_papers else '还没有文献')
+        self.empty_hint.setText('试试清除关键词或切换状态筛选' if self.all_papers else '在左侧开始检索，或导入已有的 JSON 文件')
+        self.table_view.setVisible(count > 0)
+        self.page_label.setText(f'{self.current_page} / {pages} 页')
+        self.prev_btn.setEnabled(self.current_page > 1)
+        self.next_btn.setEnabled(self.current_page < pages)
+        self._selection_changed()
+
+    def change_page(self, offset):
+        self.current_page += offset
+        self._refresh_results()
+
+    def _selection_changed(self, *args):
+        self.selection_label.setText(f'已选 {len(self.table_view.selectionModel().selectedRows())} 篇')
+
+    def show_details(self, paper):
+        if paper is not None:
+            DetailDialog(paper, self).exec()
+
+    def show_settings(self):
+        if self.job:
+            return
+        dialog = SettingsDialog({'result_page_size': self.result_page_size, 'font_size': self.font_size}, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            values = dialog.values()
+            self.result_page_size, self.font_size = values['result_page_size'], values['font_size']
+            self._apply_style()
+            self.apply_result_filter()
+            self._store_settings()
+
+    def _apply_style(self):
+        self.setStyleSheet(get_stylesheet() + f'\nQWidget {{ font-size: {self.font_size}pt; }}')
+
+    def _restore_settings(self):
+        sp, dp = self.search_panel, self.download_panel
+        sp.keyword.setText(self.settings.value('keyword', ''))
+        sp.mode.setCurrentIndex(int(self.settings.value('search_mode', 0)))
+        sp.start_page.setValue(int(self.settings.value('start_page', 1)))
+        sp.page_count.setValue(int(self.settings.value('page_count', 1)))
+        sp.page_size.setCurrentText(str(self.settings.value('search_page_size', '20')))
+        dp.output_dir.setText(self.settings.value('output_dir', str(Path('output/pdfs').resolve())))
+        legacy_delay = self.settings.value('delay')
+        dp.delay_min_spin.setValue(float(self.settings.value('delay_min', legacy_delay if legacy_delay is not None else 9)))
+        dp.delay_max_spin.setValue(float(self.settings.value('delay_max', legacy_delay if legacy_delay is not None else 11)))
+        dp.retries_spin.setValue(int(self.settings.value('retries', 3)))
+        dp.limit_spin.setValue(int(self.settings.value('limit', 0)))
+        self._select_workflow(max(0, min(2, int(self.settings.value('workflow', 0)))))
+        geometry = self.settings.value('geometry')
+        if geometry:
+            self.restoreGeometry(geometry)
+
+    def _store_settings(self):
+        sp, dp = self.search_panel, self.download_panel
+        values = {'keyword': sp.keyword.text(), 'search_mode': sp.mode.currentIndex(),
+                  'start_page': sp.start_page.value(), 'page_count': sp.page_count.value(),
+                  'search_page_size': sp.page_size.currentText(), 'output_dir': dp.output_dir.text(),
+                  'delay_min': dp.delay_min_spin.value(), 'delay_max': dp.delay_max_spin.value(),
+                  'retries': dp.retries_spin.value(),
+                  'limit': dp.limit_spin.value(), 'result_page_size': self.result_page_size,
+                  'font_size': self.font_size, 'geometry': self.saveGeometry(), 'workflow': self.flow_stack.currentIndex()}
+        for key, value in values.items():
+            self.settings.setValue(key, value)
+
+    def closeEvent(self, event):
+        if self.job:
+            answer = QMessageBox.question(self, '停止任务后关闭',
+                '当前任务仍在运行。是否停止任务，保存已完成的进度后关闭？')
+            if answer == QMessageBox.StandardButton.Yes:
+                self._close_when_idle = True
+                self.stop_task()
+            event.ignore()
+            return
+        if not self._ensure_saved():
+            self._close_when_idle = False
+            event.ignore()
+            return
+        self._store_settings()
+        event.accept()
