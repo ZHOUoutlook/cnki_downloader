@@ -1,4 +1,4 @@
-"""缺少编码时重新检索详情链接，再解析和保存当前作者链接。"""
+"""详情直接使用现有链接更新作者 URL；重新检索仅用于作者验证恢复。"""
 import json
 import sys
 from argparse import Namespace
@@ -20,7 +20,7 @@ def test_author_without_affiliation_block_is_parsed():
     assert info['authors'][0].profile_url == '/author-new'
 
 
-def test_cli_refreshes_detail_before_get_and_saves_author(tmp_path, monkeypatch):
+def test_cli_uses_existing_detail_and_saves_fresh_author_url(tmp_path, monkeypatch):
     path = tmp_path / 'papers.json'
     path.write_text(json.dumps([{'标题': '论文', '来源': '期刊', '发表时间': '2026-01-01',
         '详情链接': '/old-detail', '摘要': '摘要', '卷号': '2026', '期号': '1',
@@ -31,10 +31,10 @@ def test_cli_refreshes_detail_before_get_and_saves_author(tmp_path, monkeypatch)
     session.get.return_value = Mock(text=HTML, status_code=200, encoding='utf-8')
     monkeypatch.setattr(main, 'CNKIAuth', Mock(return_value=Mock(anonymous_login=Mock(return_value=session))))
     assert main.cmd_detail(Namespace(input=str(path))) == 0
-    search.assert_called_once_with('论文')
-    assert session.get.call_args.args[0] == 'https://kns.cnki.net/fresh-detail'
+    search.assert_not_called()
+    assert session.get.call_args.args[0] == 'https://kns.cnki.net/old-detail'
     saved = json.loads(path.read_text(encoding='utf-8'))[0]
-    assert saved['详情链接'] == 'https://kns.cnki.net/fresh-detail'
+    assert saved['详情链接'] == '/old-detail'
     assert saved['作者'][0]['profile_url'] == '/author-new'
     assert saved['摘要'] == '摘要'
 
@@ -46,7 +46,7 @@ def test_no_unique_match_keeps_existing_links(candidates, monkeypatch):
     paper = Paper(1, '论文', '/old-detail', source='期刊', authors=[Author('作者', '/old-author')])
     session = Mock()
     with pytest.raises(ValueError, match='唯一匹配'):
-        enrichment.fetch_detail(session, paper)
+        enrichment.refresh_detail_url(session, paper)
     assert paper.detail_url == '/old-detail'
     assert paper.authors[0].profile_url == '/old-author'
     session.get.assert_not_called()
@@ -61,4 +61,18 @@ def test_known_codes_do_not_trigger_search_and_survive_parsing(monkeypatch):
     enrichment.fetch_detail(session, paper)
     search.assert_not_called()
     assert paper.authors[0].au_code == '001'
+    assert paper.authors[0].profile_url == '/author-new'
+
+
+@pytest.mark.parametrize('authors', [[], [Author('作者', '/old')]])
+def test_shared_detail_updates_author_url_without_search(authors, monkeypatch):
+    search = Mock()
+    monkeypatch.setattr(enrichment.CNKISearcher, 'search_by_title', search)
+    paper = Paper(1, '论文', '/detail', authors=authors)
+    session = Mock()
+    session.get.return_value = Mock(text=HTML, status_code=200, encoding='utf-8')
+    enrichment.fetch_detail(session, paper)
+    search.assert_not_called()
+    assert session.get.call_args.args[0] == 'https://kns.cnki.net/detail'
+    assert paper.detail_url == '/detail'
     assert paper.authors[0].profile_url == '/author-new'
