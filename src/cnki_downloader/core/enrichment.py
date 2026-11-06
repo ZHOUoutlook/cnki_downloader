@@ -4,7 +4,7 @@ from urllib.parse import urljoin
 from ..config import DEFAULT_HEADERS, REQUEST_TIMEOUT
 from .parser import PaperParser
 from .search import CNKISearcher
-from .access import check_access
+from .access import AccessBlocked, check_access
 
 
 def skip_detail(paper):
@@ -49,8 +49,6 @@ def refresh_detail_url(session, paper):
 def fetch_detail(session, paper):
     if skip_detail(paper):
         return
-    if not paper.authors or any(not a.au_code for a in paper.authors):
-        paper.detail_url = refresh_detail_url(session, paper)
     url = urljoin('https://kns.cnki.net/', paper.detail_url)
     info = PaperParser.parse_paper_detail(read_page(session, url, 'https://kns.cnki.net/'))
     if not info:
@@ -66,9 +64,30 @@ def fetch_detail(session, paper):
             setattr(paper, name, value)
 
 
-def fetch_codes(session, paper, cache, log, checkpoint=lambda: None):
-    base = urljoin('https://kns.cnki.net/', paper.detail_url)
+def refresh_author_links(session, paper, blocked_author, before_request):
+    """作者页验证后重新检索并读取详情，仅更新可唯一对应的作者 URL。"""
+    before_request()
+    detail_url = refresh_detail_url(session, paper)
+    before_request()
+    info = PaperParser.parse_paper_detail(read_page(session, detail_url, 'https://kns.cnki.net/'))
+    fresh_authors = info.get('authors', [])
+    updates = []
+    for author in paper.authors:
+        matches = [a for a in fresh_authors if a.name == author.name and a.profile_url]
+        if (len(matches) == 1
+                and sum(a.name == author.name for a in fresh_authors) == 1
+                and sum(a.name == author.name for a in paper.authors) == 1):
+            updates.append((author, matches[0].profile_url))
+    if not any(author is blocked_author for author, _ in updates):
+        raise ValueError('新详情页没有该作者的唯一主页链接，保留原链接')
+    paper.detail_url = detail_url
+    for author, url in updates:
+        author.profile_url = url
+
+
+def fetch_codes(session, paper, cache, log, checkpoint=lambda: None, before_request=lambda: None):
     failures = 0
+    refreshed = False
     for author in paper.authors:
         checkpoint()
         if author.au_code:
@@ -77,14 +96,35 @@ def fetch_codes(session, paper, cache, log, checkpoint=lambda: None):
             log(f'{author.name}：没有主页链接，请先补全详情')
             failures += 1
             continue
-        url = urljoin(base, author.profile_url)
-        try:
-            code = cache.get(url) or PaperParser.parse_author_code(read_page(session, url, base))
-            if not code:
-                raise ValueError('页面没有 au-code，链接可能已过期')
-            author.au_code = cache[url] = code
-            log(f'{author.name}：{code}')
-        except Exception as exc:
-            failures += 1
-            log(f'{author.name}：编码获取失败，{exc}')
+        while True:
+            checkpoint()
+            base = urljoin('https://kns.cnki.net/', paper.detail_url)
+            url = urljoin(base, author.profile_url)
+            try:
+                code = cache.get(url)
+                if not code:
+                    before_request()
+                    code = PaperParser.parse_author_code(read_page(session, url, base))
+                if not code:
+                    raise ValueError('页面没有 au-code，链接可能已过期')
+                author.au_code = cache[url] = code
+                log(f'{author.name}：{code}')
+                break
+            except AccessBlocked:
+                if refreshed:
+                    log(f'{author.name}：刷新链接后仍遇到验证或访问限制，停止请求')
+                    raise
+                refreshed = True
+                log(f'{author.name}：遇到验证或访问限制，重新检索论文并刷新作者链接后重试一次')
+                checkpoint()
+                try:
+                    refresh_author_links(session, paper, author, before_request)
+                except AccessBlocked:
+                    raise
+                except Exception as exc:
+                    raise AccessBlocked(f'验证后的作者链接刷新失败，已停止请求：{exc}') from exc
+            except Exception as exc:
+                failures += 1
+                log(f'{author.name}：编码获取失败，{exc}')
+                break
     return failures

@@ -16,7 +16,6 @@ import json
 import math
 import time
 from copy import deepcopy
-from urllib.parse import urljoin
 
 from . import CNKIAuth, CNKISearcher
 from .downloaders import PDFDownloader
@@ -227,47 +226,14 @@ def cmd_search(args):
 
 
 def fetch_author_codes(session, paper, code_cache, delay=3):
-    """使用匿名会话逐个补齐作者编码，仅按主页链接复用成功结果。"""
-    from .core.parser import PaperParser
-    from .config import DEFAULT_HEADERS, REQUEST_TIMEOUT
+    """先访问现有作者 URL；遇到验证时刷新论文及作者链接后重试一次。"""
+    from .core.enrichment import fetch_codes
 
-    detail_url = urljoin('https://kns.cnki.net/', paper.detail_url)
-    headers = {
-        "User-Agent": DEFAULT_HEADERS["User-Agent"],
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": detail_url,
-    }
-    for author in paper.authors:
-        if author.au_code or not author.profile_url:
-            continue
-        url = urljoin(detail_url, author.profile_url)
-        if url in code_cache:
-            author.au_code = code_cache[url]
-            continue
-        print(f"🌐 正在获取作者编码: {author.name}")
-        try:
-            time.sleep(delay)
-            resp = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-            if not resp.encoding or resp.encoding.lower() == 'iso-8859-1':
-                resp.encoding = resp.apparent_encoding or 'utf-8'
-            check_access(resp)
-            resp.raise_for_status()
-            code = PaperParser.parse_author_code(resp.text)
-            if code:
-                author.au_code = code
-                code_cache[url] = code
-                print(f"✅ {author.name} au-code: {code}")
-            else:
-                print(f"⚠️ 作者页面未找到 au-code: {author.name}")
-        except AccessBlocked:
-            print(f"需要人工检查的作者：{author.name}，主页：{url}")
-            raise
-        except Exception as e:
-            print(f"⚠️ 作者编码获取失败（{author.name}）: {e}")
+    fetch_codes(session, paper, code_cache, print, before_request=lambda: time.sleep(delay))
 
 
 def cmd_author(args):
-    """根据已有作者主页链接补齐 au-code，不请求文献详情页。"""
+    """根据作者主页补齐 au-code，遇到验证时重新检索并刷新链接。"""
     session = None
     try:
         from .models import Paper
@@ -292,8 +258,12 @@ def cmd_author(args):
                     fetch_author_codes(session, paper, code_cache, delay=delay)
                 finally:
                     # 中途被验证拦截时，同篇中已经取得的编码也要保留。
+                    if paper.detail_url != data.get('详情链接', ''):
+                        data['详情链接'] = paper.detail_url
                     for author, author_data in zip(paper.authors, data.get('作者', [])):
                         author_data['au_code'] = author.au_code
+                        if author.profile_url != author_data.get('profile_url', ''):
+                            author_data['profile_url'] = author.profile_url
         except (AccessBlocked, KeyboardInterrupt) as exc:
             save_json(papers_data, args.input)
             print(f"\n⚠️ 作者编码任务已停止：{exc or '用户中断'}")
@@ -347,10 +317,6 @@ def cmd_detail(args):
             ):
                 print(f"\n🌐 正在处理论文详情: {paper.title}")
                 try:
-                    if needs_author_urls:
-                        from .core.enrichment import refresh_detail_url
-                        print('缺少作者编码，正在重新检索当前论文的详情链接...')
-                        paper.detail_url = refresh_detail_url(session, paper)
                     old_author_urls = {a.name: a.profile_url for a in paper.authors if not a.au_code}
                     # 处理相对 URL
                     url = paper.detail_url
@@ -395,7 +361,7 @@ def cmd_detail(args):
                             value = detail_info.get(attr)
                             if value:  # 跳过 None / '' / []
                                 if attr == 'authors':
-                                    # 详情链接刷新后仍保留已有编码；同名作者有歧义时重新获取。
+                                    # 从详情页更新作者 URL 时保留已有编码；同名作者有歧义时重新获取。
                                     for author in value:
                                         previous = [a for a in paper.authors if a.name == author.name]
                                         if (len(previous) == 1
