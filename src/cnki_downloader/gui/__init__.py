@@ -1,23 +1,19 @@
-"""GUI 模块"""
+"""桌面界面；按需导入 Qt，文件服务也可在无 GUI 依赖时使用。"""
+from importlib import import_module
 
-from .detail_dialog import DetailDialog
-from .download_panel import DownloadPanel
-from .main_window import MainWindow
-from .result_model import PaperTableModel
-from .result_table import ResultTable
-from .search_panel import SearchPanel
-from .settings_dialog import SettingsDialog
-from .styles import get_stylesheet
-from .workers import AuthCheckWorker
+_EXPORTS = {
+    'MainWindow': 'main_window', 'DetailDialog': 'detail_dialog',
+    'DownloadPanel': 'download_panel', 'PaperTableModel': 'result_model',
+    'ResultTable': 'result_table', 'SearchPanel': 'search_panel',
+    'SettingsDialog': 'settings_dialog', 'get_stylesheet': 'styles',
+    'AuthCheckWorker': 'workers',
+}
+__all__ = list(_EXPORTS)
 
-__all__ = [
-    'AuthCheckWorker',
-    'DetailDialog',
-    'DownloadPanel',
-    'MainWindow',
-    'PaperTableModel',
-    'ResultTable',
-    'SearchPanel',
-    'SettingsDialog',
-    'get_stylesheet',
-]
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    value = getattr(import_module('.' + _EXPORTS[name], __name__), name)
+    globals()[name] = value
+    return value

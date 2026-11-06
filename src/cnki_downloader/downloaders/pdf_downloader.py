@@ -18,6 +18,7 @@ from ..config import (
     DOWNLOAD_TIMEOUT,
     PDF_DOWNLOAD_BASE,
     REQUEST_TIMEOUT,
+    DOWNLOAD_RELOGIN_INTERVAL,
 )
 
 
@@ -30,6 +31,7 @@ class PDFDownloader(BaseDownloader):
         output_dir: str = "output/pdfs",
         json_file: Optional[str] = None,
         auth: Optional[CNKIAuth] = None ,
+        log=None,
     ):
         """
         初始化 PDF 下载器
@@ -44,7 +46,20 @@ class PDFDownloader(BaseDownloader):
         self.session = session
         self.json_file = json_file
         self.auth = auth
+        self._log_callback = log
         self.searcher = CNKISearcher(session)
+
+    def _log(self, *args, **kwargs):
+        """命令行默认打印；GUI 通过回调实时显示下载步骤。"""
+        if self._log_callback is None:
+            print(*args, **kwargs)
+        else:
+            from io import StringIO
+            stream = StringIO()
+            print(*args, file=stream, **kwargs)
+            for line in stream.getvalue().splitlines():
+                if line.strip():
+                    self._log_callback(line)
 
     def _relogin(self) -> bool:
         """
@@ -54,21 +69,27 @@ class PDFDownloader(BaseDownloader):
             bool: 是否登录成功
         """
         if not self.auth:
-            print("   ⚠️ 未提供 auth 对象，无法重新登录")
+            self._log("   ⚠️ 未提供 auth 对象，无法重新登录")
             return False
 
         try:
-            print("   🔄 正在重新登录...")
+            self._log("   🔄 正在重新登录...")
             new_session = self.auth.ip_login()
-            if new_session:
+            if new_session is not None and self.auth.is_authenticated():
+                old_session = self.session
                 self.session = new_session
-                print("   ✅ 重新登录成功")
+                self.searcher.session = new_session
+                if old_session is not new_session:
+                    old_session.close()
+                self._log("   ✅ 重新登录成功")
                 return True
             else:
-                print("   ❌ 重新登录失败")
+                if new_session is not None and new_session is not self.session:
+                    new_session.close()
+                self._log("   ❌ 重新登录失败")
                 return False
         except Exception as e:
-            print(f"   ❌ 重新登录失败: {e}")
+            self._log(f"   ❌ 重新登录失败: {e}")
             return False
 
     def _refresh_detail_url(self, paper: 'Paper', retry_count: int = 0) -> Optional[str]:
@@ -85,12 +106,12 @@ class PDFDownloader(BaseDownloader):
         max_retries = 2
 
         if not paper.title:
-            print("   ⚠️ 论文标题为空，无法搜索")
+            self._log("   ⚠️ 论文标题为空，无法搜索")
             return None
 
         try:
-            print(f"   🔄 正在通过标题重新搜索获取详情链接...")
-            print(f"   📝 标题: {paper.title[:50]}{'...' if len(paper.title) > 50 else ''}")
+            self._log(f"   🔄 正在通过标题重新搜索获取详情链接...")
+            self._log(f"   📝 标题: {paper.title[:50]}{'...' if len(paper.title) > 50 else ''}")
             
             papers = self.searcher.search_by_title(
                 title=paper.title,
@@ -99,29 +120,29 @@ class PDFDownloader(BaseDownloader):
             )
 
             if not papers:
-                print("   ⚠️ 未找到匹配的论文")
+                self._log("   ⚠️ 未找到匹配的论文")
                 return None
 
             # 查找标题完全匹配的论文
             for p in papers:
                 if p.title == paper.title:
-                    print(f"   ✅ 找到匹配的论文，获取到新的详情链接")
+                    self._log(f"   ✅ 找到匹配的论文，获取到新的详情链接")
                     return p.detail_url
 
             # 如果没有完全匹配的论文，提示用户并返回 None
             if papers:
-                print(f"   ⚠️ 未找到完全匹配，使用第一个搜索结果")
-                print(f"   📝 搜索结果标题: {papers[0].title[:50]}{'...' if len(papers[0].title) > 50 else ''}")
+                self._log(f"   ⚠️ 未找到完全匹配，使用第一个搜索结果")
+                self._log(f"   📝 搜索结果标题: {papers[0].title[:50]}{'...' if len(papers[0].title) > 50 else ''}")
                 return None
 
             return None
 
         except Exception as e:
-            print(f"   ❌ 重新搜索失败: {e}")
+            self._log(f"   ❌ 重新搜索失败: {e}")
 
             # 重试
             if retry_count < max_retries:
-                print(f"   🔄 重试获取详情链接 (第 {retry_count + 1} 次)...")
+                self._log(f"   🔄 重试获取详情链接 (第 {retry_count + 1} 次)...")
                 time.sleep(2)
                 return self._refresh_detail_url(paper, retry_count + 1)
 
@@ -173,11 +194,11 @@ class PDFDownloader(BaseDownloader):
             )
             # 检查是否被重定向到登录页面或验证页面
             if response.status_code == 302 or 'login' in response.url.lower():
-                print(f"   ⚠️ 可能需要重新登录，状态码: {response.status_code}")
+                self._log(f"   ⚠️ 可能需要重新登录，状态码: {response.status_code}")
 
                 # 尝试重新登录
                 if retry_count < max_retries and self.auth:
-                    print(f"   🔄 尝试重新登录 (第 {retry_count + 1} 次)...")
+                    self._log(f"   🔄 尝试重新登录 (第 {retry_count + 1} 次)...")
                     if self._relogin():
                         # 等待一段时间后重试
                         time.sleep(2)
@@ -190,20 +211,20 @@ class PDFDownloader(BaseDownloader):
 
             # 检查返回内容是否有效（不是验证页面）
             if '验证' in response.text[:500] or 'captcha' in response.text[:500].lower() or "�" in response.text[:500].lower():
-                print(f"   ⚠️ 触发验证机制，详情链接可能已过期")
+                self._log(f"   ⚠️ 触发验证机制，详情链接可能已过期")
 
                 # 优先尝试通过重新搜索获取新的详情链接
                 if paper and paper.title:
                     new_url = self._refresh_detail_url(paper)
                     paper.detail_url = new_url  # 更新论文对象中的详情链接
                     if new_url:
-                        print(f"   🔄 使用新的详情链接重试...")
+                        self._log(f"   🔄 使用新的详情链接重试...")
                         time.sleep(2)
                         return self._get_detail_page(new_url, retry_count, paper)
 
                 # 如果无法获取新链接，尝试重新登录后重试原链接
                 if retry_count < max_retries and self.auth:
-                    print(f"   🔄 尝试重新登录 (第 {retry_count + 1} 次)...")
+                    self._log(f"   🔄 尝试重新登录 (第 {retry_count + 1} 次)...")
                     if self._relogin():
                         time.sleep(3)
                         return self._get_detail_page(url, retry_count + 1, paper)
@@ -213,29 +234,29 @@ class PDFDownloader(BaseDownloader):
             return response.text
 
         except requests.exceptions.Timeout:
-            print(f"   ⚠️ 请求超时")
+            self._log(f"   ⚠️ 请求超时")
 
             # 超时后重试
             if retry_count < max_retries:
-                print(f"   🔄 重试获取详情页 (第 {retry_count + 1} 次)...")
+                self._log(f"   🔄 重试获取详情页 (第 {retry_count + 1} 次)...")
                 time.sleep(2)
                 return self._get_detail_page(url, retry_count + 1, paper)
 
             return None
 
         except requests.exceptions.ConnectionError as e:
-            print(f"   ⚠️ 连接错误: {e}")
+            self._log(f"   ⚠️ 连接错误: {e}")
 
             # 连接错误后重试
             if retry_count < max_retries:
-                print(f"   🔄 重试获取详情页 (第 {retry_count + 1} 次)...")
+                self._log(f"   🔄 重试获取详情页 (第 {retry_count + 1} 次)...")
                 time.sleep(3)
                 return self._get_detail_page(url, retry_count + 1, paper)
 
             return None
 
         except Exception as e:
-            print(f"   获取详情页失败: {e}")
+            self._log(f"   获取详情页失败: {e}")
             return None
 
     def _extract_pdf_url(self, html: str) -> Optional[str]:
@@ -269,13 +290,13 @@ class PDFDownloader(BaseDownloader):
             if caj_btn:
                 href = caj_btn.get('href', '')
                 if href and 'bar.cnki.net/bar/download' in href:
-                    print("  ⚠️ 未找到 PDF 链接，将下载 CAJ 格式")
+                    self._log("  ⚠️ 未找到 PDF 链接，将下载 CAJ 格式")
                     return href
 
             return None
 
         except Exception as e:
-            print(f"  解析 PDF 链接失败: {e}")
+            self._log(f"  解析 PDF 链接失败: {e}")
             return None
 
     def _download_file(self, url: str, filepath: Path) -> bool:
@@ -314,7 +335,7 @@ class PDFDownloader(BaseDownloader):
 
             # 检查是否被重定向到登录页面
             if response.status_code == 302 or 'login' in response.url.lower():
-                print(f"   ⚠️ 下载时需要重新登录")
+                self._log(f"   ⚠️ 下载时需要重新登录")
                 return False
 
             response.raise_for_status()
@@ -350,7 +371,7 @@ class PDFDownloader(BaseDownloader):
                 return False
 
         except Exception as e:
-            print(f"  下载文件失败: {e}")
+            self._log(f"  下载文件失败: {e}")
             return False
 
     def download(self, paper: Paper, filename: Optional[str] = None) -> Optional[str]:
@@ -366,8 +387,8 @@ class PDFDownloader(BaseDownloader):
         """
         # 检查是否有详情页链接
         if not paper.detail_url:
-            print(f"❌ [{paper.seq}] {paper.title}")
-            print(f"   没有详情页链接")
+            self._log(f"❌ [{paper.seq}] {paper.title}")
+            self._log(f"   没有详情页链接")
             return None
 
         # 确定文件名
@@ -384,40 +405,40 @@ class PDFDownloader(BaseDownloader):
         caj_path = self.output_dir / f"{safe_name}.caj"
 
         if pdf_path.exists():
-            print(f"⏭️ [{paper.seq}] {paper.title}")
-            print(f"   PDF 已存在: {pdf_path}")
+            self._log(f"⏭️ [{paper.seq}] {paper.title}")
+            self._log(f"   PDF 已存在: {pdf_path}")
             paper.download_status = "completed"
             paper.local_pdf_path = str(pdf_path)
             return str(pdf_path)
 
         if caj_path.exists():
-            print(f"⏭️ [{paper.seq}] {paper.title}")
-            print(f"   CAJ 已存在: {caj_path}")
+            self._log(f"⏭️ [{paper.seq}] {paper.title}")
+            self._log(f"   CAJ 已存在: {caj_path}")
             paper.download_status = "completed"
             paper.local_pdf_path = str(caj_path)
             return str(caj_path)
 
-        print(f"📥 [{paper.seq}] {paper.title}")
+        self._log(f"📥 [{paper.seq}] {paper.title}")
 
         # 步骤1: 获取详情页
-        print(f"   获取详情页...")
+        self._log(f"   获取详情页...")
         html = self._get_detail_page(paper.detail_url, paper=paper)
         if not html:
-            print(f"   ❌ 获取详情页失败")
+            self._log(f"   ❌ 获取详情页失败")
             paper.download_status = "failed"
             return None
         
         # 步骤2: 提取 PDF 下载链接
-        print(f"   解析下载链接...")
+        self._log(f"   解析下载链接...")
         download_url = self._extract_pdf_url(html)
         if not download_url:
-            print(f"   ❌ 未找到下载链接")
+            self._log(f"   ❌ 未找到下载链接")
             # 进入安全验证界面后，详情页会变成一个提示页面，无法获取下载链接，这时可以尝试重新登录
             paper.download_status = "failed"
             return None
 
         # 步骤3: 下载文件
-        print(f"   下载文件...")
+        self._log(f"   下载文件...")
         # 先尝试 .pdf 扩展名
         temp_path = self.output_dir / f"{safe_name}.pdf"
 
@@ -428,12 +449,12 @@ class PDFDownloader(BaseDownloader):
             else:
                 final_path = temp_path
 
-            print(f"   ✅ 下载成功: {final_path.name}")
+            self._log(f"   ✅ 下载成功: {final_path.name}")
             paper.download_status = "completed"
             paper.local_pdf_path = str(final_path)
             return str(final_path)
         else:
-            print(f"   ❌ 下载失败")
+            self._log(f"   ❌ 下载失败")
             paper.download_status = "failed"
             return None
 
@@ -481,17 +502,17 @@ class PDFDownloader(BaseDownloader):
                 p.download_status = "completed"
 
                 
-        print(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接且还没下载")
+        self._log(f"\n📄 共 {len(papers)} 篇论文，{len(downloadable)} 篇有详情链接且还没下载")
         
         if not downloadable or skip_download:
-            print("❌ 没有可需要下载的论文或者跳过下载，直接返回")
+            self._log("❌ 没有可需要下载的论文或者跳过下载，直接返回")
             return papers
         # 打乱下载顺序
         random.shuffle(downloadable)
         for i, paper in enumerate(downloadable, 1):
-            print(f"\n[{i}/{len(downloadable)}] ", end="")
+            self._log(f"\n[{i}/{len(downloadable)}] ", end="")
             if paper.db_type == "视频":
-                print(f"⚠️ 跳过：数据库类型为 视频")
+                self._log(f"⚠️ 跳过：数据库类型为 视频")
                 results['skipped'] += 1
                 continue
             # 更新状态为下载中
@@ -504,34 +525,34 @@ class PDFDownloader(BaseDownloader):
                 results['files'].append(filepath)
             else:
                 results['failed'] += 1
-                print(f"   ❌ 下载失败")
+                self._log(f"   ❌ 下载失败")
             # 添加延迟，避免请求过快
             if i < len(downloadable) and delay > 0:
                 random_delay = delay * (0.5 + 0.5 * random.random())  # 5-10秒随机延迟
-                print(f"   ⏳ 等待 {random_delay:.1f} 秒...")
+                self._log(f"   ⏳ 等待 {random_delay:.1f} 秒...")
                 time.sleep(random_delay)
 
             # 每下载 30 篇清除 session cookies 并重新登录
-            if i % 30 == 0 and i < len(downloadable):
-                print(f"\n   🧹 已下载 {i} 篇，清除 session cookies...")
+            if i % DOWNLOAD_RELOGIN_INTERVAL == 0 and i < len(downloadable):
+                self._log(f"\n   🧹 已下载 {i} 篇，清除 session cookies...")
                 self.session.cookies.clear()
 
                 # 重新登录
                 if self.auth:
                     if not self._relogin():
-                        print("   ⚠️ 重新登录失败，继续尝试下载...")
+                        self._log("   ⚠️ 重新登录失败，继续尝试下载...")
 
                 # 等待一段时间
                 if delay > 0:
                     random_delay = delay * (0.5 + 0.5 * random.random())
-                    print(f"   ⏳ 等待 {random_delay:.1f} 秒...")
+                    self._log(f"   ⏳ 等待 {random_delay:.1f} 秒...")
                     time.sleep(random_delay)
 
-        print(f"\n{'='*50}")
-        print(f"📊 下载统计:")
-        print(f"   ✅ 成功: {results['success']}")
-        print(f"   ❌ 失败: {results['failed']}")
-        print(f"{'='*50}")
+        self._log(f"\n{'='*50}")
+        self._log(f"📊 下载统计:")
+        self._log(f"   ✅ 成功: {results['success']}")
+        self._log(f"   ❌ 失败: {results['failed']}")
+        self._log(f"{'='*50}")
 
         return papers
 

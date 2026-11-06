@@ -30,6 +30,9 @@ dev = ["pytest>=7.0", "pytest-mock>=3.0", "responses>=0.23"]
 [project.scripts]
 cnki = "cnki_downloader.main:main"
 
+[project.gui-scripts]
+cnki-gui = "cnki_downloader.gui_app:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["cnki_downloader*"]
