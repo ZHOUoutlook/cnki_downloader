@@ -151,6 +151,9 @@ class PaperTaskWorker(TaskWorker):
         if not 0 <= self.interval_min <= self.interval_max:
             raise ValueError('随机请求间隔必须满足 0 ≤ 最短间隔 ≤ 最长间隔')
 
+    def _persist_update(self, index, paper):
+        self.paper_updated.emit(index, deepcopy(paper))
+
     def wait_interval(self):
         seconds = random.uniform(self.interval_min, self.interval_max)
         if seconds > 0:
@@ -212,7 +215,7 @@ class PaperTaskWorker(TaskWorker):
                             success += 1
                 except AccessBlocked:
                     # 保存当前论文已取得的编码及刷新后的 URL，然后停止整批请求。
-                    self.paper_updated.emit(index, deepcopy(paper))
+                    self._persist_update(index, paper)
                     raise
                 except TaskStopped:
                     self.paper_updated.emit(index, deepcopy(paper))
