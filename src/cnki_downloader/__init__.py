@@ -8,7 +8,7 @@ from .models import Paper, Author
 from .downloaders import BaseDownloader, PDFDownloader
 from .utils import save_json, load_json, print_paper_summary
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 __all__ = [
     'CNKIAuth',
     'CNKISearcher',

@@ -75,7 +75,7 @@ pip install cnki_downloader-<version>-py3-none-any.whl
 pip install "cnki_downloader-<version>-py3-none-any.whl[gui]"
 ```
 
-> `<version>` 替换为实际版本号，如 `0.1.0`。
+> `<version>` 替换为实际版本号，如 `0.2.0`。
 
 ### 可选组件
 
