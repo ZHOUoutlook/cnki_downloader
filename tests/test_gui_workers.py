@@ -120,6 +120,129 @@ def test_download_samples_new_random_delay_for_retry_and_each_paper(monkeypatch,
     assert downloader.download.call_count == 4
 
 
+def test_download_randomizes_queue_and_keeps_json_row_mapping(monkeypatch, tmp_path):
+    from cnki_downloader.gui.workspace import Workspace
+    import json
+    monkeypatch.setattr(workers, 'CNKIAuth', Mock())
+    monkeypatch.setattr(workers.random, 'shuffle', lambda tasks: tasks.reverse())
+    seen = []
+    downloader = Mock()
+    def download(paper):
+        seen.append(paper.seq)
+        return str(tmp_path / f'{paper.seq}.pdf')
+    downloader.download.side_effect = download
+    monkeypatch.setattr(workers, 'PDFDownloader', lambda *a, **kw: downloader)
+    papers = [Paper(i, str(i), '/p') for i in range(4)]
+    store = Workspace(papers, path=tmp_path / 'library.json')
+    worker = workers.PaperTaskWorker('download', papers, workspace=store, delay=0, limit=3)
+    worker.run()
+    assert seen == [2, 1, 0]
+    rows = json.loads(store.path.read_text(encoding='utf-8'))
+    for index in range(3):
+        assert rows[index]['本地PDF路径'] == str(tmp_path / f'{index}.pdf')
+    assert rows[3]['下载状态'] == 'pending'
+
+
+@pytest.mark.parametrize('count', [30, 31, 61])
+def test_download_relogs_every_30_papers_and_closes_active_session(monkeypatch, tmp_path, count):
+    auth = Mock()
+    sessions = [Mock()]
+    auth.ip_login.side_effect = lambda: sessions[-1]
+    monkeypatch.setattr(workers, 'CNKIAuth', lambda: auth)
+    downloader = Mock(session=sessions[0])
+    visits = []
+    def download(paper):
+        visits.append(downloader.session)
+        return str(tmp_path / f'{paper.seq}.pdf')
+    def relogin():
+        old = downloader.session
+        old.close()
+        sessions.append(Mock())
+        downloader.session = sessions[-1]
+        return True
+    downloader.download.side_effect = download
+    downloader._relogin.side_effect = relogin
+    monkeypatch.setattr(workers, 'PDFDownloader', lambda *a, **kw: downloader)
+    worker = workers.PaperTaskWorker('download', [Paper(i, str(i), '/p') for i in range(count)], delay=0)
+    worker.wait_interval = Mock()
+    worker.run()
+    renewals = (count - 1) // 30
+    assert downloader._relogin.call_count == renewals
+    assert worker.wait_interval.call_count == count - 1 + renewals
+    for index, session in enumerate(sessions):
+        assert all(visit is session for visit in visits[index * 30: min(count, (index + 1) * 30)])
+        session.close.assert_called_once()
+        assert session.cookies.clear.call_count == (1 if index < renewals else 0)
+
+
+def test_download_relogin_failure_stops_after_saving_progress(monkeypatch, tmp_path):
+    from cnki_downloader.gui.workspace import Workspace
+    import json
+    auth = Mock()
+    monkeypatch.setattr(workers, 'CNKIAuth', lambda: auth)
+    downloader = Mock(session=auth.ip_login.return_value)
+    downloader.download.side_effect = lambda p: str(tmp_path / f'{p.seq}.pdf')
+    downloader._relogin.return_value = False
+    monkeypatch.setattr(workers, 'PDFDownloader', lambda *a, **kw: downloader)
+    papers = [Paper(i, str(i), '/p') for i in range(31)]
+    store = Workspace(papers, path=tmp_path / 'library.json')
+    worker = workers.PaperTaskWorker('download', papers, workspace=store, delay=0)
+    errors = []
+    worker.failed.connect(errors.append)
+    worker.run()
+    assert downloader.download.call_count == 30
+    assert errors and '重新登录失败' in errors[0]
+    rows = json.loads(store.path.read_text(encoding='utf-8'))
+    assert sum(row['下载状态'] == 'completed' for row in rows) == 30
+
+
+@pytest.mark.parametrize('authorized', [True, False])
+def test_downloader_relogin_updates_search_session_only_after_authorization(tmp_path, authorized):
+    old, new = Mock(), Mock()
+    auth = Mock()
+    auth.ip_login.return_value = new
+    auth.is_authenticated.return_value = authorized
+    downloader = workers.PDFDownloader(old, str(tmp_path), auth=auth)
+    assert downloader._relogin() == authorized
+    if authorized:
+        assert downloader.session is downloader.searcher.session is new
+        old.close.assert_called_once()
+        new.close.assert_not_called()
+    else:
+        assert downloader.session is downloader.searcher.session is old
+        old.close.assert_not_called()
+        new.close.assert_called_once()
+
+
+def test_periodic_login_uses_real_downloader_and_hides_auth_output(monkeypatch, tmp_path, capsys):
+    sessions = [Mock(), Mock()]
+    auth = Mock()
+    auth.is_authenticated.return_value = True
+    def login():
+        print('private cookie value')
+        return sessions[auth.ip_login.call_count - 1]
+    auth.ip_login.side_effect = login
+    monkeypatch.setattr(workers, 'CNKIAuth', lambda: auth)
+    seen = []
+    def download(downloader, paper):
+        seen.append(downloader.session)
+        assert downloader.searcher.session is downloader.session
+        return str(tmp_path / f'{paper.seq}.pdf')
+    monkeypatch.setattr(workers.PDFDownloader, 'download', download)
+    worker = workers.PaperTaskWorker('download', [Paper(i, str(i), '/p') for i in range(31)], delay=0)
+    errors = []
+    worker.failed.connect(errors.append)
+    worker.run()
+    assert not errors
+    assert seen == [sessions[0]] * 30 + [sessions[1]]
+    auth.ip_login.assert_called()
+    assert auth.ip_login.call_count == 2
+    sessions[0].cookies.clear.assert_called_once()
+    for session in sessions:
+        session.close.assert_called_once()
+    assert 'private cookie value' not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize('minimum, maximum', [(-1, 3), (12, 9)])
 def test_invalid_random_delay_range_is_rejected(minimum, maximum):
     with pytest.raises(ValueError):

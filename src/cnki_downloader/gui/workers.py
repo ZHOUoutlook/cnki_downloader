@@ -16,6 +16,7 @@ from ..core.enrichment import needs_detail, fetch_detail, fetch_codes
 from ..core.access import AccessBlocked
 from ..downloaders import PDFDownloader
 from ..utils import sanitize_filename
+from ..config import DOWNLOAD_RELOGIN_INTERVAL
 from .workspace import Workspace, SearchTransaction
 
 
@@ -256,11 +257,25 @@ class PaperTaskWorker(TaskWorker):
         if self.limit:
             tasks = tasks[:self.limit]
             self.log.emit(f'🔢 本次最多下载 {self.limit} 篇，实际待下载 {len(tasks)} 篇')
+        random.shuffle(tasks)
         return tasks
+
+    def _refresh_download_session(self, downloader, done):
+        self.checkpoint()
+        self.log.emit(f'🧹 已处理 {done} 篇，清理会话并重新登录…')
+        downloader.session.cookies.clear()
+        # 认证输出可能包含 cookies，仍只显示下载器的结构化日志。
+        with redirect_stdout(StringIO()):
+            renewed = downloader._relogin()
+        if not renewed:
+            raise ConnectionError('定期重新登录失败，下载已停止，已完成进度已保存')
+        self.checkpoint()
+        self.wait_interval()
 
     def run(self):
         session = None
         success = failed = skipped = done = 0
+        downloader = None
         total = len(self.papers)
         try:
             self.checkpoint()
@@ -349,11 +364,14 @@ class PaperTaskWorker(TaskWorker):
                 self.progress.emit(done, total, success, failed, skipped)
                 if position + 1 < total:
                     self.wait_interval()
+                    if self.operation == 'download' and done % DOWNLOAD_RELOGIN_INTERVAL == 0:
+                        self._refresh_download_session(downloader, done)
             self.completed.emit(f'任务完成：成功 {success}，失败 {failed}，跳过 {skipped}')
         except TaskStopped:
             self.completed.emit(f'任务已停止，已处理 {done}/{total} 篇，进度已保留')
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
-            if session is not None:
-                session.close()
+            active_session = getattr(downloader, 'session', session) if downloader is not None else session
+            if active_session is not None:
+                active_session.close()

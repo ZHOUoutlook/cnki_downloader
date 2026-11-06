@@ -18,6 +18,7 @@ from ..config import (
     DOWNLOAD_TIMEOUT,
     PDF_DOWNLOAD_BASE,
     REQUEST_TIMEOUT,
+    DOWNLOAD_RELOGIN_INTERVAL,
 )
 
 
@@ -74,11 +75,17 @@ class PDFDownloader(BaseDownloader):
         try:
             self._log("   🔄 正在重新登录...")
             new_session = self.auth.ip_login()
-            if new_session:
+            if new_session is not None and self.auth.is_authenticated():
+                old_session = self.session
                 self.session = new_session
+                self.searcher.session = new_session
+                if old_session is not new_session:
+                    old_session.close()
                 self._log("   ✅ 重新登录成功")
                 return True
             else:
+                if new_session is not None and new_session is not self.session:
+                    new_session.close()
                 self._log("   ❌ 重新登录失败")
                 return False
         except Exception as e:
@@ -526,7 +533,7 @@ class PDFDownloader(BaseDownloader):
                 time.sleep(random_delay)
 
             # 每下载 30 篇清除 session cookies 并重新登录
-            if i % 30 == 0 and i < len(downloadable):
+            if i % DOWNLOAD_RELOGIN_INTERVAL == 0 and i < len(downloadable):
                 self._log(f"\n   🧹 已下载 {i} 篇，清除 session cookies...")
                 self.session.cookies.clear()
 

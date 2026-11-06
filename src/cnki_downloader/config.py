@@ -116,6 +116,7 @@ TITLE_QUERY = {
 LOGIN_TIMEOUT = 15
 REQUEST_TIMEOUT = 20
 DOWNLOAD_TIMEOUT = 60  # PDF 下载超时时间
+DOWNLOAD_RELOGIN_INTERVAL = 30  # 批量下载每处理 30 篇后更新会话
 
 # ===================== 输出目录 =====================
 OUTPUT_DIR = "output"
