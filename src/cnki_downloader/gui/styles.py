@@ -7,6 +7,8 @@ def get_stylesheet():
     QMainWindow, QWidget#appRoot, QWidget#workspace { background: #F5F6FA; }
     QFrame#appHeader { background: white; border-bottom: 1px solid #E9EBF2; }
     QFrame#sidebar { background: #FFFFFF; border-right: 1px solid #E9EBF2; }
+    QSplitter::handle { background: #E3E6EF; }
+    QSplitter::handle:hover { background: #A6ABDA; }
     QLabel { background: transparent; }
     QLabel#brandTitle { color: #242A3B; font-size: 14pt; font-weight: 700; }
     QLabel#headerCaption { color: #6E788C; font-size: 9pt; }

@@ -1,7 +1,10 @@
 """下载参数面板。"""
 from pathlib import Path
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QSpinBox, QDoubleSpinBox, QPushButton, QHBoxLayout, QFileDialog, QLabel
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QSpinBox, QDoubleSpinBox, QPushButton, QHBoxLayout, QFileDialog, QLabel, QMessageBox
 from .search_panel import field
+from .icons import icon
 
 
 class DownloadPanel(QWidget):
@@ -69,9 +72,23 @@ class DownloadPanel(QWidget):
         self.download_btn = QPushButton('开始下载')
         self.download_btn.setObjectName('primaryButton')
         layout.addWidget(self.download_btn)
+        self.open_dir_btn = QPushButton('打开下载目录')
+        self.open_dir_btn.setIcon(icon('folder', size=18))
+        self.open_dir_btn.setToolTip('在文件管理器中查看下载的 PDF / CAJ')
+        self.open_dir_btn.clicked.connect(self.open_output_directory)
+        layout.addWidget(self.open_dir_btn)
         self.browse_btn.clicked.connect(self.browse)
 
     def browse(self):
         path = QFileDialog.getExistingDirectory(self, '选择下载目录', self.output_dir.text())
         if path:
             self.output_dir.setText(path)
+
+    def open_output_directory(self):
+        value = self.output_dir.text().strip()
+        directory = Path(value).expanduser().resolve() if value else None
+        if directory is None or not directory.is_dir():
+            QMessageBox.information(self, '打开下载目录', '下载目录尚不存在，请先选择已有目录或完成一次下载。')
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+            QMessageBox.warning(self, '打开失败', f'无法打开目录：{directory}')

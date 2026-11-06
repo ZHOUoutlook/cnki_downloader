@@ -34,7 +34,7 @@ class ResultTable(QTableView):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         for index, width in enumerate([48, 380, 140, 110, 100, 64, 54, 125, 104]):
             self.setColumnWidth(index, width)
-        for column in (0, 3, 4, 6):
+        for column in (0, 4, 5, 6):
             self.setColumnHidden(column, True)
         self.setSortingEnabled(True)
         self.sortByColumn(0, Qt.SortOrder.AscendingOrder)

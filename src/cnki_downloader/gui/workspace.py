@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -68,6 +69,21 @@ def _normalize_record(row, position):
     return row
 
 
+def replace_file(source, target):
+    # Windows 上读文件的句柄可能短暂不允许替换；复用同一个完整临时文件。
+    for attempt in range(5):
+        try:
+            os.replace(source, target)
+            break
+        except PermissionError as exc:
+            if attempt == 4:
+                raise PermissionError(
+                    f'无法替换“{target}”，已重试 4 次。文件可能被其他程序占用或没有替换权限；'
+                    f'请关闭占用程序后重试，或另存为其他文件名。原始错误：{exc}'
+                ) from exc
+            time.sleep(0.1 * (2 ** attempt))
+
+
 class Workspace:
     def __init__(self, papers=None, path=None, raw=None):
         self.papers = list(papers or [])
@@ -82,23 +98,31 @@ class Workspace:
         records = [_normalize_record(row, position) for position, row in enumerate(data, 1)]
         return cls([Paper.from_dict(row) for row in records], path, records)
 
-    def save(self, path=None):
-        target = Path(path).resolve() if path else self.path
-        if target is None:
-            raise ValueError('请先选择保存文件')
+    def to_rows(self):
         rows = []
         for paper, raw in zip(self.papers, self.raw):
-            row = deepcopy(raw)
+            # 先覆盖模型字段，避免深拷贝随后就会丢弃的旧摘要、关键词和作者列表。
+            row = dict(raw)
+            # 路径清空时模型会省略该字段，不能从原始记录带回已失效的旧值。
+            row.pop('本地PDF路径', None)
             row.update(paper.to_dict())
             # 仅对名字唯一的作者复用附加字段，避免同名作者串数据。
             old_authors = raw.get('作者', [])
             for author in row['作者']:
                 old = [a for a in old_authors if a.get('name', a.get('作者名')) == author['name']]
                 if len(old) == 1 and sum(a['name'] == author['name'] for a in row['作者']) == 1:
-                    extra = deepcopy(old[0])
+                    extra = dict(old[0])
                     extra.update(author)
                     author.update(extra)
-            rows.append(row)
+            # 最终结果只深拷贝一次，附加字段及模型中的列表均与快照隔离。
+            rows.append(deepcopy(row))
+        return rows
+
+    def save(self, path=None):
+        target = Path(path).resolve() if path else self.path
+        if target is None:
+            raise ValueError('请先选择保存文件')
+        rows = self.to_rows()
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
         try:
@@ -108,7 +132,7 @@ class Workspace:
                 json.dump(rows, stream, ensure_ascii=False, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, target)
+            replace_file(temporary, target)
         finally:
             if temporary and Path(temporary).exists():
                 Path(temporary).unlink()
@@ -135,3 +159,34 @@ class Workspace:
                 self.raw.append({})
                 added += 1
         return added
+
+
+class SearchTransaction:
+    """检索期间只改同目录临时 JSON，正常完成后提交一次。"""
+    def __init__(self, workspace):
+        self.workspace = workspace
+        self.target = workspace.path
+        self.temporary = None
+
+    def begin(self):
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=self.target.parent, prefix=self.target.name + '.',
+                                         suffix='.search.json', delete=False) as stream:
+            self.temporary = Path(stream.name)
+        self.workspace.path = self.temporary
+        self.workspace.save()
+
+        self.merge([])
+
+    def merge(self, papers):
+        # 与命令行采用同一套已验证的历史去重及增量合并规则。
+        from ..main import merge_search_results
+        rows, stats = merge_search_results(papers, self.workspace.to_rows())
+        self.workspace.papers = [Paper.from_dict(row) for row in rows]
+        self.workspace.raw = rows
+        self.workspace.save()
+        return stats
+
+    def commit(self):
+        replace_file(self.temporary, self.target)
+        self.workspace.path = self.target

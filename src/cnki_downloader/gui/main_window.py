@@ -2,18 +2,18 @@
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSettings, QTimer
+from PyQt6.QtCore import Qt, QSettings, QTimer, QEvent
 from PyQt6.QtGui import QAction, QKeySequence, QTextCursor
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                             QFrame, QLabel, QPushButton, QLineEdit, QComboBox, QGroupBox,
                             QScrollArea, QSplitter, QPlainTextEdit, QProgressBar,
-                            QFileDialog, QMessageBox, QDialog, QStackedWidget, QButtonGroup, QSizePolicy)
+                            QFileDialog, QMessageBox, QDialog, QStackedWidget, QButtonGroup, QSizePolicy, QBoxLayout)
 
 from .. import __version__
 from ..utils import sanitize_filename
 from .search_panel import SearchPanel
 from .download_panel import DownloadPanel
-from .detail_dialog import DetailDialog
+from .detail_dialog import DetailDialog, open_web_url
 from .settings_dialog import SettingsDialog
 from .result_table import ResultTable
 from .result_model import PaperTableModel
@@ -36,13 +36,18 @@ class MainWindow(QMainWindow):
         self._save_failed = False
         self._close_when_idle = False
         self._paused = False
+        self._result_refresh = QTimer(self)
+        self._result_refresh.setSingleShot(True)
+        self._result_refresh.setInterval(150)
+        self._result_refresh.timeout.connect(self._refresh_results)
         self.result_page_size = int(self.settings.value('result_page_size', 20))
         self.font_size = int(self.settings.value('font_size', 10))
         self.setWindowTitle('CNKI 论文助手 · 文献工作台')
         self.resize(1440, 900)
-        self.setMinimumSize(1100, 760)
+        self.setMinimumSize(860, 540)
         self._init_ui()
         self._init_menu()
+        self.menuBar().hide()
         self._restore_settings()
         self._apply_style()
         self._refresh_results()
@@ -76,9 +81,10 @@ class MainWindow(QMainWindow):
         bar.addWidget(brand)
         caption = QLabel('  /  研究工作台')
         caption.setObjectName('headerCaption')
+        self.header_caption = caption
         bar.addWidget(caption)
         bar.addStretch()
-        self.network_label = QLabel('匿名模式')
+        self.network_label = QLabel('连接未检查')
         self.network_label.setObjectName('mutedLabel')
         connection = QLabel()
         connection.setPixmap(icon('wifi', '#8A93A6', 16).pixmap(16))
@@ -86,6 +92,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.network_label)
         self.network_btn = QPushButton('检查连接')
         self.network_btn.setObjectName('ghostButton')
+        self.network_btn.setToolTip('分别检查匿名访问和 IP（校园网）授权登录')
         self.network_btn.clicked.connect(self.check_network)
         bar.addWidget(self.network_btn)
         self.settings_btn = QPushButton('设置')
@@ -93,26 +100,53 @@ class MainWindow(QMainWindow):
         self.settings_btn.setObjectName('ghostButton')
         self.settings_btn.clicked.connect(self.show_settings)
         bar.addWidget(self.settings_btn)
+        self.github_btn = QPushButton()
+        self.github_btn.setObjectName('ghostButton')
+        self.github_btn.setIcon(icon('github'))
+        self.github_btn.setToolTip('访问 GitHub 项目主页 · cnki_downloader')
+        self.github_btn.setAccessibleName('访问 GitHub 项目主页')
+        self.github_btn.clicked.connect(lambda: open_web_url('https://github.com/ZHOUoutlook/cnki_downloader'))
+        bar.addWidget(self.github_btn)
         layout.addWidget(header)
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-        body.addWidget(self._create_sidebar())
+        self.body_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.body_splitter.setChildrenCollapsible(False)
+        self.body_splitter.setHandleWidth(7)
+        self.sidebar_scroll = QScrollArea()
+        self.sidebar_scroll.setWidgetResizable(True)
+        self.sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.sidebar_scroll.setMinimumWidth(240)
+        self.sidebar_scroll.setWidget(self._create_sidebar())
+        self.body_splitter.addWidget(self.sidebar_scroll)
         workspace = QWidget()
         workspace.setObjectName('workspace')
         content = QVBoxLayout(workspace)
+        self.workspace_layout = content
         content.setContentsMargins(28, 24, 28, 20)
         content.setSpacing(16)
-        content.addWidget(self._create_results(), 1)
-        content.addWidget(self._create_task_panel())
-        body.addWidget(workspace, 1)
-        layout.addLayout(body, 1)
+        self.content_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.content_splitter.setChildrenCollapsible(False)
+        self.content_splitter.setHandleWidth(7)
+        self.results_area = self._create_results()
+        self.task_panel = self._create_task_panel()
+        self.content_splitter.addWidget(self.results_area)
+        self.content_splitter.addWidget(self.task_panel)
+        self.content_splitter.setStretchFactor(0, 1)
+        self.content_splitter.setStretchFactor(1, 0)
+        self.content_splitter.setSizes([650, 70])
+        self._expanded_task_height = 220
+        content.addWidget(self.content_splitter, 1)
+        self.body_splitter.addWidget(workspace)
+        self.body_splitter.setStretchFactor(0, 0)
+        self.body_splitter.setStretchFactor(1, 1)
+        self.body_splitter.setSizes([280, 1160])
+        self.results_area.installEventFilter(self)
+        layout.addWidget(self.body_splitter, 1)
         self.statusBar().hide()
 
     def _create_sidebar(self):
         sidebar = QFrame()
         sidebar.setObjectName('sidebar')
-        sidebar.setFixedWidth(280)
+        sidebar.setMinimumWidth(240)
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(20, 20, 20, 20)
         side.setSpacing(6)
@@ -214,69 +248,61 @@ class MainWindow(QMainWindow):
         self.count_label = QLabel('0 篇')
         self.count_label.setObjectName('countBadge')
         title_row.addWidget(self.count_label)
-        title_row.addStretch()
-        self.open_btn = QPushButton('导入文献')
-        self.open_btn.setIcon(icon('folder', size=18))
-        self.open_btn.clicked.connect(self.open_json)
-        self.save_btn = QPushButton('保存文献库')
-        self.save_btn.setObjectName('secondaryButton')
-        self.save_btn.setIcon(icon('save', size=18))
-        self.save_btn.clicked.connect(self.save_workspace)
-        title_row.addWidget(self.open_btn)
-        title_row.addWidget(self.save_btn)
-        layout.addLayout(title_row)
         self.file_label = QLabel('未打开文件 · 开始检索，或导入已有文献')
         self.file_label.setObjectName('fileBreadcrumb')
         self.file_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        layout.addWidget(self.file_label)
+        title_row.addWidget(self.file_label, 1)
+        self.open_btn = QPushButton('导入文献')
+        self.open_btn.setIcon(icon('folder', size=18))
+        self.open_btn.clicked.connect(self.open_json)
+        title_row.addWidget(self.open_btn)
+        layout.addLayout(title_row)
         card = QFrame()
         card.setObjectName('contentPanel')
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(16, 8, 16, 12)
         card_layout.setSpacing(0)
+        self.tools_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         tabs = QHBoxLayout()
-        tabs.setSpacing(20)
+        tabs.setSpacing(10)
         self.view_group = QButtonGroup(self)
         self.view_group.setExclusive(True)
         self.view_buttons = []
-        for i, text in enumerate(['全部文献', '编码待补全', '已下载']):
+        views = [('全部文献', 0), ('编码待补全', 4), ('已下载', 2),
+                 ('待下载', 1), ('下载失败', 3)]
+        for text, status_index in views:
             button = QPushButton(text)
             button.setObjectName('viewTab')
             button.setCheckable(True)
-            self.view_group.addButton(button, i)
+            self.view_group.addButton(button, status_index)
             self.view_buttons.append(button)
             tabs.addWidget(button)
         self.view_buttons[0].setChecked(True)
-        self.view_group.idClicked.connect(lambda i: self.status_filter.setCurrentIndex([0, 4, 2][i]))
-        tabs.addStretch()
+        self.view_group.idClicked.connect(self.apply_result_filter)
+        filters = QHBoxLayout()
+        self.tools_layout.addLayout(tabs)
+        self.tools_layout.addLayout(filters, 1)
+        self.filter_input = QLineEdit()
+        self.filter_input.setObjectName('libraryFilter')
+        self.filter_input.setPlaceholderText('搜索文献标题、作者或来源')
+        self.filter_input.setAccessibleName('筛选文献')
+        self.filter_input.setMinimumWidth(120)
+        self.filter_input.setClearButtonEnabled(True)
+        self.filter_input.addAction(icon('search', '#A1A8B8', 18), QLineEdit.ActionPosition.LeadingPosition)
+        self.filter_input.textChanged.connect(self.apply_result_filter)
+        filters.addWidget(self.filter_input, 1)
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(['默认排序', '最新发表', '被引最多', '按标题排序'])
         self.sort_combo.setAccessibleName('排序方式')
         self.sort_combo.setMaximumWidth(140)
         self.sort_combo.currentIndexChanged.connect(self._on_sort_choice)
-        tabs.addWidget(self.sort_combo)
-        card_layout.addLayout(tabs)
-        card_layout.addSpacing(12)
-        filters = QHBoxLayout()
-        filters.setSpacing(10)
-        self.filter_input = QLineEdit()
-        self.filter_input.setObjectName('libraryFilter')
-        self.filter_input.setPlaceholderText('搜索文献标题、作者或来源')
-        self.filter_input.setAccessibleName('筛选文献')
-        self.filter_input.setClearButtonEnabled(True)
-        self.filter_input.addAction(icon('search', '#A1A8B8', 18), QLineEdit.ActionPosition.LeadingPosition)
-        self.filter_input.textChanged.connect(self.apply_result_filter)
-        self.status_filter = QComboBox()
-        self.status_filter.addItems(['全部状态', '待下载', '已下载', '下载失败', '编码待补全'])
-        self.status_filter.currentIndexChanged.connect(self.apply_result_filter)
-        self.status_filter.setMaximumWidth(134)
-        filters.addWidget(self.filter_input, 1)
-        filters.addWidget(self.status_filter)
-        card_layout.addLayout(filters)
+        filters.addWidget(self.sort_combo)
+        card_layout.addLayout(self.tools_layout)
         card_layout.addSpacing(12)
         self.scope = QComboBox()
         self.scope.addItems(['当前筛选结果（全部页）', '仅选中的文献'])
-        self.scope.setFixedWidth(205)
+        self.scope.setMinimumWidth(160)
+        self.scope.setMaximumWidth(205)
         self.scope.setAccessibleName('操作范围')
         self.scope.setToolTip('补全详情、作者编码和下载任务的处理范围')
         self.selection_label = QLabel('已选 0 篇')
@@ -313,9 +339,13 @@ class MainWindow(QMainWindow):
         card_layout.addSpacing(8)
         pager = QHBoxLayout()
         self.table_view.setToolTip('双击文献或按 Enter 查看完整详情')
-        pager.addWidget(self.scope)
-        pager.addWidget(self.selection_label)
-        pager.addWidget(self.select_all_btn)
+        self.pager_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        selection = QHBoxLayout()
+        self.pager_layout.addLayout(selection)
+        self.pager_layout.addLayout(pager)
+        selection.addWidget(self.scope)
+        selection.addWidget(self.selection_label)
+        selection.addWidget(self.select_all_btn)
         pager.addStretch()
         self.prev_btn = QPushButton('上一页')
         self.next_btn = QPushButton('下一页')
@@ -328,7 +358,7 @@ class MainWindow(QMainWindow):
         pager.addWidget(self.prev_btn)
         pager.addWidget(self.page_label)
         pager.addWidget(self.next_btn)
-        card_layout.addLayout(pager)
+        card_layout.addLayout(self.pager_layout)
         layout.addWidget(card, 1)
         return area
 
@@ -354,12 +384,23 @@ class MainWindow(QMainWindow):
         row.addWidget(self.task_label, 1)
         self.stats_label = QLabel('后台执行 · 自动保存')
         self.stats_label.setObjectName('mutedLabel')
+        self.stats_label.setMinimumWidth(0)
+        self.stats_label.setWordWrap(True)
         row.addWidget(self.stats_label)
         self.log_toggle = QPushButton('查看日志')
         self.log_toggle.setObjectName('ghostButton')
         self.log_toggle.setCheckable(True)
         self.log_toggle.toggled.connect(self._set_log_visible)
         row.addWidget(self.log_toggle)
+        self.export_log_btn = QPushButton()
+        self.export_log_btn.setObjectName('ghostButton')
+        self.export_log_btn.setIcon(icon('download', size=18))
+        self.export_log_btn.setFixedWidth(36)
+        self.export_log_btn.setStyleSheet('padding: 5px;')
+        self.export_log_btn.setToolTip('导出当前日志（TXT）')
+        self.export_log_btn.setAccessibleName('导出日志')
+        self.export_log_btn.clicked.connect(self.export_log)
+        row.addWidget(self.export_log_btn)
         self.pause_btn = QPushButton('暂停')
         self.pause_btn.setIcon(icon('pause', size=14))
         self.pause_btn.setObjectName('ghostButton')
@@ -379,16 +420,50 @@ class MainWindow(QMainWindow):
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumBlockCount(2000)
-        self.log_text.setFixedHeight(130)
+        self.log_text.setMinimumHeight(70)
+        self.log_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.log_text.setPlaceholderText('任务进度和处理记录会显示在这里。')
         self.log_text.hide()
-        layout.addWidget(self.log_text)
+        layout.addWidget(self.log_text, 1)
         return panel
 
     def _set_log_visible(self, visible):
+        if not visible and self.log_text.isVisible():
+            self._expanded_task_height = self.content_splitter.sizes()[1]
         self.log_text.setVisible(visible)
         self.log_toggle.setChecked(visible)
         self.log_toggle.setText('收起日志' if visible else '查看日志')
+        self.content_splitter.setHandleWidth(7 if visible else 0)
+        handle = self.content_splitter.handle(1)
+        handle.setEnabled(visible)
+        handle.setCursor(Qt.CursorShape.SplitVCursor if visible else Qt.CursorShape.ArrowCursor)
+        total = sum(self.content_splitter.sizes())
+        height = self._expanded_task_height if visible else self.task_panel.minimumSizeHint().height()
+        self.content_splitter.setSizes([max(1, total - height), height])
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, 'results_area', None) and event.type() == QEvent.Type.Resize:
+            self._adapt_layout()
+        return super().eventFilter(watched, event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, '_layout_restore_pending', False):
+            self._layout_restore_pending = False
+            for key, splitter in (('body_splitter', self.body_splitter), ('content_splitter', self.content_splitter)):
+                state = self.settings.value(key)
+                if state:
+                    splitter.restoreState(state)
+            self._set_log_visible(self.log_toggle.isChecked())
+
+    def _adapt_layout(self):
+        compact = self.results_area.width() < 760
+        direction = QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight
+        self.tools_layout.setDirection(direction)
+        self.pager_layout.setDirection(direction)
+        self.header_caption.setVisible(self.width() >= 1100)
+        margin = 12 if compact else 28
+        self.workspace_layout.setContentsMargins(margin, 16, margin, 16)
 
     def _init_menu(self):
         files = self.menuBar().addMenu('文件')
@@ -401,6 +476,7 @@ class MainWindow(QMainWindow):
         self._action(files, '退出', self.close, QKeySequence.StandardKey.Quit)
         tools = self.menuBar().addMenu('工具')
         self._action(tools, '设置…', self.show_settings)
+        self.export_log_action = self._action(tools, '导出日志…', self.export_log)
         self._action(tools, '清空日志', self.log_text.clear)
         help_menu = self.menuBar().addMenu('帮助')
         self._action(help_menu, '关于', lambda: QMessageBox.information(
@@ -417,6 +493,25 @@ class MainWindow(QMainWindow):
     def append_log(self, message):
         self.log_text.appendPlainText(f'{datetime.now():%H:%M:%S}  {message}')
         self.log_text.moveCursor(QTextCursor.MoveOperation.End)
+
+    def export_log(self):
+        content = self.log_text.toPlainText()
+        if not content.strip():
+            QMessageBox.information(self, '导出日志', '暂无日志可导出。')
+            return False
+        stem = self.workspace.path.stem if self.workspace.path else 'CNKI'
+        directory = self.workspace.path.parent if self.workspace.path else Path.cwd()
+        default = directory / f'{stem}_日志_{datetime.now():%Y%m%d_%H%M%S}.txt'
+        filename, _ = QFileDialog.getSaveFileName(self, '导出日志', str(default), '文本文件 (*.txt)')
+        if not filename:
+            return False
+        try:
+            Path(filename).write_text(content + '\n', encoding='utf-8-sig')
+        except OSError as exc:
+            QMessageBox.warning(self, '导出失败', str(exc))
+            return False
+        self.append_log(f'日志已导出：{filename}')
+        return True
 
     def _update_recent_menu(self):
         self.recent_menu.clear()
@@ -449,7 +544,7 @@ class MainWindow(QMainWindow):
         self.workspace = workspace
         self.dirty = False
         self.filter_input.clear()
-        self.status_filter.setCurrentIndex(0)
+        self.view_group.button(0).setChecked(True)
         self.apply_result_filter()
         self._remember_file()
         self.append_log(f'已导入 {len(self.all_papers)} 篇：{workspace.path}')
@@ -503,31 +598,38 @@ class MainWindow(QMainWindow):
             sp.keyword.setFocus()
             self.task_label.setText('请先输入期刊名称或论文标题')
             return
-        if not self._ensure_saved():
-            return
-        filename, _ = QFileDialog.getSaveFileName(self, '选择搜索结果文件（已有文件会增量合并）',
-            str(Path('output') / (sanitize_filename(keyword) + '.json')), 'JSON 文件 (*.json)')
-        if not filename:
-            return
-        try:
-            self.workspace = Workspace.load(filename) if Path(filename).exists() else Workspace(path=filename)
-        except Exception as exc:
-            QMessageBox.warning(self, '无法读取已有文件', str(exc))
-            return
+        if self.workspace.path is None:
+            filename, _ = QFileDialog.getSaveFileName(self, '选择搜索结果文件（已有文件会增量合并）',
+                str(Path('output') / (sanitize_filename(keyword) + '.json')), 'JSON 文件 (*.json)')
+            if not filename:
+                return
+            try:
+                self.workspace = Workspace.load(filename) if Path(filename).exists() else Workspace(path=filename)
+            except Exception as exc:
+                QMessageBox.warning(self, '无法读取已有文件', str(exc))
+                return
         self.filter_input.clear()
-        self.status_filter.setCurrentIndex(0)
+        self.view_group.button(0).setChecked(True)
         self.apply_result_filter()
         self._remember_file()
         worker = SearchWorker(sp.mode.currentData(), keyword, sp.page_count.value(),
-                              int(sp.page_size.currentText()), sp.start_page.value(), self)
+                              int(sp.page_size.currentText()), sp.start_page.value(), self,
+                              workspace=self.workspace)
         worker.papers_loaded.connect(self._search_page_loaded)
+        worker.workspace_ready.connect(self._search_workspace_ready)
         self._start_job(worker, '正在搜索文献')
 
     def _search_page_loaded(self, papers):
         added = self.workspace.merge(papers)
         self.dirty = True
         self.append_log(f'本页获取 {len(papers)} 篇，新增 {added} 篇')
-        self._autosave()
+        if not self._result_refresh.isActive():
+            self._result_refresh.start()
+
+    def _search_workspace_ready(self, workspace, committed):
+        self.workspace = workspace
+        self.dirty = not committed
+        self._remember_file()
         self._refresh_results()
 
     def target_indices(self):
@@ -551,8 +653,6 @@ class MainWindow(QMainWindow):
                 self.task_label.setText('请先选择下载保存目录')
                 dp.output_dir.setFocus()
                 return
-            if dp.limit_spin.value():
-                indices = indices[:dp.limit_spin.value()]
         if not self.workspace.path and not self.save_as():
             return
         if not self._ensure_saved():
@@ -562,16 +662,32 @@ class MainWindow(QMainWindow):
             output_dir=dp.output_dir.text().strip(),
             delay=dp.delay_min_spin.value() if operation == 'download' else 0,
             delay_max=dp.delay_max_spin.value() if operation == 'download' else 0,
-            retries=dp.retries_spin.value(), parent=self)
+            retries=dp.retries_spin.value(), parent=self,
+            workspace=self.workspace, indices=indices,
+            limit=dp.limit_spin.value() if operation == 'download' else 0)
         worker.paper_updated.connect(self._paper_updated)
+        worker.paper_saved.connect(self._paper_saved)
+        worker.save_failed.connect(self._background_save_failed)
         label = {'detail': '补全详情 / 刷新作者链接', 'author': '获取作者编码', 'download': '下载文献'}[operation]
         self._start_job(worker, f'{label} · {len(indices)} 篇')
 
     def _paper_updated(self, index, paper):
         self.workspace.papers[self.task_indices[index]] = paper
         self.dirty = True
-        self._autosave()
-        self._refresh_results()
+        if not self._result_refresh.isActive():
+            self._result_refresh.start()
+
+    def _paper_saved(self):
+        self.dirty = False
+        if self.workspace.path:
+            self.file_label.setText(self.workspace.path.name)
+
+    def _background_save_failed(self, message):
+        self.dirty = True
+        self._save_failed = True
+        self.append_log(f'保存失败：{message}。进度保留在内存中，请另存 JSON。')
+        if self.job:
+            self.job.cancel()
 
     def _autosave(self):
         if not self._save_failed:
@@ -614,6 +730,9 @@ class MainWindow(QMainWindow):
         self._set_log_visible(True)
 
     def _job_finished(self):
+        if self._result_refresh.isActive():
+            self._result_refresh.stop()
+            self._refresh_results()
         job = self.job
         self.job = None
         if job:
@@ -631,7 +750,7 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy):
         for widget in (self.search_panel, self.process_group, self.download_panel, self.open_btn,
-                       self.save_btn, self.network_btn, self.settings_btn, self.scope):
+                       self.network_btn, self.settings_btn, self.scope):
             widget.setEnabled(not busy)
         for action in (self.open_action, self.save_action, self.save_as_action):
             action.setEnabled(not busy)
@@ -641,7 +760,6 @@ class MainWindow(QMainWindow):
         has_data = bool(self.all_papers)
         self.process_group.setEnabled(not busy and has_data)
         self.download_panel.download_btn.setEnabled(not busy and has_data)
-        self.save_btn.setEnabled(not busy and has_data)
 
     def toggle_pause(self):
         if self.job:
@@ -661,11 +779,27 @@ class MainWindow(QMainWindow):
     def check_network(self):
         if self.job:
             return
+        self._connection_status = {False: '匿名未检查', True: 'IP未检查'}
+        self._connection_details = {}
+        self.network_label.setText('匿名未检查 · IP未检查')
+        self.network_label.setToolTip('正在分别检查匿名访问和 IP（校园网）授权登录')
         worker = AuthCheckWorker(self)
-        worker.succeeded.connect(lambda: self.network_label.setText('匿名连接正常'))
-        worker.succeeded.connect(lambda: self._task_completed('匿名连接正常；下载时单独进行 IP 登录'))
-        worker.failed.connect(lambda message: self.network_label.setText('连接失败 · 可重试'))
-        self._start_job(worker, '正在检查匿名连接')
+        worker.checked.connect(self._connection_checked)
+        self._start_job(worker, '正在检查匿名访问和 IP（校园网）授权')
+
+    def _connection_checked(self, download, available, detail):
+        if download:
+            status = 'IP已授权' if available else 'IP不可用'
+            label = 'IP（校园网）'
+        else:
+            status = '匿名正常' if available else '匿名不可用'
+            label = '匿名访问'
+        self._connection_status[download] = status
+        self._connection_details[download] = f'{label}：{detail}'
+        self.network_label.setText(' · '.join(self._connection_status.values()))
+        self.network_label.setToolTip('\n'.join(self._connection_details.values()))
+        if not available:
+            self._set_log_visible(True)
 
     def apply_result_filter(self, *args):
         self.current_page = 1
@@ -673,7 +807,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_results(self):
         keyword = self.filter_input.text().strip().casefold()
-        status = self.status_filter.currentIndex()
+        status = self.view_group.checkedId()
         def matches(p):
             text = ' '.join([p.title, p.source, ' '.join(a.name for a in p.authors)]).casefold()
             return (not keyword or keyword in text) and (
@@ -691,10 +825,6 @@ class MainWindow(QMainWindow):
         start = max(0, self.current_page - 1) * self.result_page_size
         self.table_model.set_papers(self.filtered_papers[start:start + self.result_page_size])
         self.count_label.setText(f'{count} / {len(self.all_papers)} 篇' if count != len(self.all_papers) else f'{count} 篇')
-        self.view_group.setExclusive(False)
-        for button, status_index in zip(self.view_buttons, [0, 4, 2]):
-            button.setChecked(status == status_index)
-        self.view_group.setExclusive(True)
         self.empty_label.setVisible(count == 0)
         self.empty_state.setVisible(count == 0)
         self.empty_label.setText('没有符合条件的文献' if self.all_papers else '还没有文献')
@@ -747,9 +877,16 @@ class MainWindow(QMainWindow):
         geometry = self.settings.value('geometry')
         if geometry:
             self.restoreGeometry(geometry)
+        available = self.screen().availableGeometry()
+        self.resize(min(self.width(), available.width()), min(self.height(), available.height()))
+        self._layout_restore_pending = True
+        self._expanded_task_height = int(self.settings.value('log_height', 220))
+        self._set_log_visible(self.settings.value('log_visible', False, type=bool))
 
     def _store_settings(self):
         sp, dp = self.search_panel, self.download_panel
+        if self.log_toggle.isChecked():
+            self._expanded_task_height = self.content_splitter.sizes()[1]
         values = {'keyword': sp.keyword.text(), 'search_mode': sp.mode.currentIndex(),
                   'start_page': sp.start_page.value(), 'page_count': sp.page_count.value(),
                   'search_page_size': sp.page_size.currentText(), 'output_dir': dp.output_dir.text(),
@@ -759,6 +896,10 @@ class MainWindow(QMainWindow):
                   'font_size': self.font_size, 'geometry': self.saveGeometry(), 'workflow': self.flow_stack.currentIndex()}
         for key, value in values.items():
             self.settings.setValue(key, value)
+        self.settings.setValue('body_splitter', self.body_splitter.saveState())
+        self.settings.setValue('content_splitter', self.content_splitter.saveState())
+        self.settings.setValue('log_visible', self.log_toggle.isChecked())
+        self.settings.setValue('log_height', self._expanded_task_height)
 
     def closeEvent(self, event):
         if self.job:
